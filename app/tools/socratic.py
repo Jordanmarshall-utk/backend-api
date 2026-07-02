@@ -22,6 +22,33 @@ if sys.platform == "win32":
 _edison_client = None
 _edison_models = None
 _given_vars = None
+_reasoning_layer_build_fn = None
+
+
+def _lazy_import_reasoning_layer():
+    global _reasoning_layer_build_fn
+    if _reasoning_layer_build_fn is None:
+        from app.tools.scientific_reasoning_policy_layer import build_reasoning_prompt
+        _reasoning_layer_build_fn = build_reasoning_prompt
+    return _reasoning_layer_build_fn
+
+
+def _apply_reasoning_policy(base_prompt: str, task: str, task_type: str, policy: str = "auto") -> tuple:
+    """Wrap base_prompt with the selected reasoning policy. Falls back gracefully on any error."""
+    if not policy or policy.strip().lower() in ("none", "off", "disabled"):
+        return base_prompt, {"reasoning_layer_enabled": False}
+    try:
+        build_fn = _lazy_import_reasoning_layer()
+        return build_fn(
+            base_prompt=base_prompt,
+            task=task,
+            agent_name="Hypothesis Agent",
+            task_type=task_type,
+            policy=policy,
+        )
+    except Exception as exc:
+        logging.warning(f"Reasoning policy layer unavailable, using base prompt: {exc}")
+        return base_prompt, {"reasoning_layer_enabled": False}
 
 # Initialize API key from environment
 QWEN_API_KEY = (
@@ -159,7 +186,7 @@ def clarify_question(question: str) -> str:
         return None
 
 
-def socratic_pass(clarified_question_response: str) -> str:
+def socratic_pass(clarified_question_response: str, reasoning_policy: str = "auto") -> str:
     """LLM is performing self questioning on clarified question response"""
 
     try:
@@ -174,6 +201,14 @@ def socratic_pass(clarified_question_response: str) -> str:
         Socratic Principles: {given_vars.socratic_principles}
         """
 
+        if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
+            socratic_pass_prompt, _ = _apply_reasoning_policy(
+                socratic_pass_prompt,
+                task=f"Apply probing questions to: {clarified_question_response[:300]}",
+                task_type="gap_analysis",
+                policy=reasoning_policy,
+            )
+
         llm_response = generate_text_with_llm(socratic_pass_prompt)
         return llm_response
 
@@ -181,7 +216,7 @@ def socratic_pass(clarified_question_response: str) -> str:
         logging.error(f"SOCRATIC pass failed: {e}")
 
 
-def socratic_pass_and_tot(clarified_question: str) -> tuple:
+def socratic_pass_and_tot(clarified_question: str, reasoning_policy: str = "auto") -> tuple:
     """
     Single LLM call: socratic probing + three lines of thought.
     Falls back to separate socratic_pass + tot_generation if parsing fails.
@@ -218,6 +253,14 @@ Required format:
 ## Distinct Line of Thought 3:
 <third thought>
 """
+        if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
+            combined_prompt, _ = _apply_reasoning_policy(
+                combined_prompt,
+                task=f"Apply probing questions and generate exploration paths for: {clarified_question[:200]}",
+                task_type="gap_analysis",
+                policy=reasoning_policy,
+            )
+
         llm_response = generate_text_with_llm(combined_prompt)
         if not llm_response or not str(llm_response).strip():
             raise ValueError("empty combined socratic/tot response")
@@ -243,13 +286,13 @@ Required format:
         substantial = [t for t in thoughts if t and len(str(t).strip()) > 20]
         if not soc_pass or len(substantial) < 3:
             logging.info("Combined socratic/tot parse weak; falling back to sequential calls")
-            soc_pass = socratic_pass(clarified_question) or ""
-            thoughts = tot_generation(soc_pass, clarified_question, None)
+            soc_pass = socratic_pass(clarified_question, reasoning_policy=reasoning_policy) or ""
+            thoughts = tot_generation(soc_pass, clarified_question, None, reasoning_policy=reasoning_policy)
         return soc_pass, thoughts
     except Exception as e:
         logging.warning(f"socratic_pass_and_tot failed, using sequential flow: {e}")
-        soc_pass = socratic_pass(clarified_question) or ""
-        return soc_pass, tot_generation(soc_pass, clarified_question, None)
+        soc_pass = socratic_pass(clarified_question, reasoning_policy=reasoning_policy) or ""
+        return soc_pass, tot_generation(soc_pass, clarified_question, None, reasoning_policy=reasoning_policy)
 
 
 def _parse_tot_thoughts_from_text(text: str) -> list:
@@ -528,13 +571,14 @@ def tot_generation_experimental_plan(socratic_pass_questioning: str, clarified_q
         return ["Error generating experimental plans", "Please check API key and try again", ""]
 
 
-def tot_generation(socratic_pass_questioning: str, clarified_question: str, socratic_answers: str = None) -> list:
+def tot_generation(socratic_pass_questioning: str, clarified_question: str, socratic_answers: str = None, reasoning_policy: str = "auto") -> list:
     """LLM produces three distinct lines of thought (rationale, predicted outcomes, and next step question)
 
     Args:
         socratic_pass_questioning: The probing questions generated
         clarified_question: The clarified user question
         socratic_answers: The answers to the probing questions (if available)
+        reasoning_policy: The philosophical reasoning school to apply (default "auto")
     """
     try:
         # Lazy import instructions
@@ -555,6 +599,14 @@ def tot_generation(socratic_pass_questioning: str, clarified_question: str, socr
         Prefer lines of thought supported by the packet. Novel extrapolations are
         allowed, but label them as hypotheses rather than established findings.
         """
+
+        if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
+            tot_generation_prompt, _ = _apply_reasoning_policy(
+                tot_generation_prompt,
+                task=f"Generate three exploration paths for: {clarified_question[:300]}",
+                task_type="hypothesis",
+                policy=reasoning_policy,
+            )
 
         if socratic_answers:
             logging.info(f"Generating TOT with socratic answers (length: {len(socratic_answers)})...")
@@ -1138,7 +1190,7 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
 
 
 def hypothesis_synthesis(socratic_question: str, next_step_option: str, previous_option_1: str,
-                         previous_option_2: str, conversation_context: str) -> str:
+                         previous_option_2: str, conversation_context: str, reasoning_policy: str = "auto") -> str:
     # Produce hypothesis based on user selected thoughts and other information
     try:
         # Lazy import instructions
@@ -1163,6 +1215,14 @@ def hypothesis_synthesis(socratic_question: str, next_step_option: str, previous
             Ground the hypothesis in supplied evidence, preserve provenance identifiers,
             and explicitly label any unsupported extrapolation as a proposed mechanism.
             """
+
+        if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
+            hypothesis_synthesis_prompt, _ = _apply_reasoning_policy(
+                hypothesis_synthesis_prompt,
+                task=f"Synthesize hypothesis from: {next_step_option[:300]}",
+                task_type="hypothesis",
+                policy=reasoning_policy,
+            )
 
         llm_response = generate_text_with_llm(hypothesis_synthesis_prompt)
 

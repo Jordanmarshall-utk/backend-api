@@ -47,6 +47,17 @@ def agents_status(
     return get_agents_status(experiment_id)
 
 
+@router.get("/agents/reasoning-policies")
+def list_reasoning_policies(
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> dict:
+    from app.tools.scientific_reasoning_policy_layer import list_available_policies, POLICY_ALIASES
+    return {
+        "policies": list_available_policies(),
+        "aliases": POLICY_ALIASES,
+    }
+
+
 @router.post("/agents/hypothesis/chat", response_model=HypothesisChatResponse)
 def hypothesis_chat(
     body: HypothesisChatRequest,
@@ -62,6 +73,7 @@ def hypothesis_chat(
             action=body.action,
             question=body.question,
             choice=body.choice,
+            reasoning_policy=body.reasoning_policy or "auto",
         )
         try:
             return HypothesisChatResponse(**result)
@@ -96,6 +108,7 @@ def hypothesis_chat_stream(
             action=body.action,
             question=body.question,
             choice=body.choice,
+            reasoning_policy=body.reasoning_policy or "auto",
         )
 
     return StreamingResponse(

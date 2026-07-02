@@ -72,6 +72,7 @@ class HypothesisChatRequest(BaseModel):
     question: Optional[str] = None
     choice: Optional[str] = None
     experiment_id: Optional[int] = None
+    reasoning_policy: Optional[str] = "auto"
 
 
 class HypothesisChatBubble(BaseModel):
@@ -97,6 +98,7 @@ class HypothesisChatResponse(BaseModel):
     document_id: Optional[str] = None
     document_markdown: Optional[str] = None
     pdf_url: Optional[str] = None
+    reasoning_metadata: Optional[Dict[str, Any]] = None
 
 
 class WorkflowRunRequest(BaseModel):

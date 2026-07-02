@@ -75,11 +75,14 @@ def _full_context(agent: HypothesisAgent) -> str:
     return trim_context(context)
 
 
-def submit_question(memory: Any, question: str) -> Dict[str, Any]:
+def submit_question(memory: Any, question: str, reasoning_policy: str = "auto") -> Dict[str, Any]:
     _ensure_api_key(memory)
     q = question.strip()
     if not q:
         raise ValueError("Question is required.")
+
+    policy = reasoning_policy or "auto"
+    memory.set_var("reasoning_policy", policy)
 
     clarified = socratic.clarify_question(q)
     if not clarified or not str(clarified).strip():
@@ -87,19 +90,19 @@ def submit_question(memory: Any, question: str) -> Dict[str, Any]:
 
     soc_answers: Optional[str] = None
     if fast_submit_enabled():
-        soc_pass, thoughts = socratic.socratic_pass_and_tot(clarified)
+        soc_pass, thoughts = socratic.socratic_pass_and_tot(clarified, reasoning_policy=policy)
     elif skip_socratic_answers():
-        soc_pass = socratic.socratic_pass(clarified)
+        soc_pass = socratic.socratic_pass(clarified, reasoning_policy=policy)
         if not soc_pass or not str(soc_pass).strip():
             raise ValueError("Could not generate socratic questions.")
         soc_answers = ""
-        thoughts = socratic.tot_generation(soc_pass, clarified, None)
+        thoughts = socratic.tot_generation(soc_pass, clarified, None, reasoning_policy=policy)
     else:
-        soc_pass = socratic.socratic_pass(clarified)
+        soc_pass = socratic.socratic_pass(clarified, reasoning_policy=policy)
         if not soc_pass or not str(soc_pass).strip():
             raise ValueError("Could not generate socratic questions.")
         soc_answers = socratic.socratic_answer_questions(clarified, soc_pass)
-        thoughts = socratic.tot_generation(soc_pass, clarified, soc_answers)
+        thoughts = socratic.tot_generation(soc_pass, clarified, soc_answers, reasoning_policy=policy)
 
     if not soc_pass or not str(soc_pass).strip():
         raise ValueError("Could not generate socratic questions.")
@@ -303,6 +306,8 @@ def generate_hypothesis(memory: Any) -> Dict[str, Any]:
     agent = _agent(memory)
     opt1, opt2, opt3 = _next_step_options(memory)
 
+    reasoning_policy = str(memory.get_var("reasoning_policy") or "auto")
+
     soc_q = (
         memory.view_component("retry_thinking_question")
         or memory.view_component("socratic_pass")
@@ -334,9 +339,22 @@ def generate_hypothesis(memory: Any) -> Dict[str, Any]:
         )
 
     context = trim_context(_full_context(agent))
-    hypothesis = socratic.hypothesis_synthesis(soc_q, selected, prev1, prev2, context)
+    hypothesis = socratic.hypothesis_synthesis(soc_q, selected, prev1, prev2, context, reasoning_policy=reasoning_policy)
     if hypothesis is None or not str(hypothesis).strip():
         raise ValueError("Error generating hypothesis. Check your API key in Settings.")
+
+    reasoning_meta: Optional[Dict] = None
+    try:
+        from app.tools.scientific_reasoning_policy_layer import select_reasoning_policy
+        sel = select_reasoning_policy(
+            task=f"Synthesize hypothesis for: {soc_q[:200]}",
+            agent_name="Hypothesis Agent",
+            task_type="hypothesis",
+            requested_policy=reasoning_policy,
+        )
+        reasoning_meta = sel.to_dict()
+    except Exception:
+        pass
 
     analysis_rubric: Optional[str] = None
     if not skip_analysis_on_generate():
@@ -371,6 +389,7 @@ def generate_hypothesis(memory: Any) -> Dict[str, Any]:
         "messages": bubbles,
         "assistant_message": join_bubbles_for_legacy(bubbles),
         "options": [],
+        **({"reasoning_metadata": reasoning_meta} if reasoning_meta else {}),
         **_hypothesis_document_fields(memory, str(hypothesis), analysis_rubric),
     }
 
@@ -389,13 +408,14 @@ def handle_chat(
     action: str,
     question: Optional[str] = None,
     choice: Optional[str] = None,
+    reasoning_policy: str = "auto",
 ) -> Dict[str, Any]:
     if action == "reset":
         return reset_session(memory)
     if action == "submit_question":
         if not question:
             raise ValueError("question is required for submit_question")
-        return submit_question(memory, question)
+        return submit_question(memory, question, reasoning_policy=reasoning_policy)
     if action == "choose_option":
         if not choice:
             raise ValueError("choice is required for choose_option")

@@ -44,11 +44,14 @@ def _complete(result: Dict[str, Any]) -> Dict[str, Any]:
     return {"type": "complete", **result}
 
 
-def iter_submit_question(memory: Any, question: str) -> Iterator[Dict[str, Any]]:
+def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "auto") -> Iterator[Dict[str, Any]]:
     require_api_key(memory)
     q = question.strip()
     if not q:
         raise ValueError("Question is required.")
+
+    policy = reasoning_policy or "auto"
+    memory.set_var("reasoning_policy", policy)
 
     clarified = socratic.clarify_question(q)
     if not clarified or not str(clarified).strip():
@@ -65,7 +68,7 @@ def iter_submit_question(memory: Any, question: str) -> Iterator[Dict[str, Any]]
 
     if fast_submit_enabled():
         yield _progress("socratic_tot", [], label="Generating Socratic pass and exploration paths…")
-        soc_pass, thoughts = socratic.socratic_pass_and_tot(clarified)
+        soc_pass, thoughts = socratic.socratic_pass_and_tot(clarified, reasoning_policy=policy)
         if soc_pass and str(soc_pass).strip():
             yield _progress(
                 "socratic_pass",
@@ -79,7 +82,7 @@ def iter_submit_question(memory: Any, question: str) -> Iterator[Dict[str, Any]]
             )
     elif skip_socratic_answers():
         yield _progress("socratic_pass", [], label="Generating Socratic pass…")
-        soc_pass = socratic.socratic_pass(clarified)
+        soc_pass = socratic.socratic_pass(clarified, reasoning_policy=policy)
         if not soc_pass or not str(soc_pass).strip():
             raise ValueError("Could not generate socratic questions.")
         soc_answers = ""
@@ -88,10 +91,10 @@ def iter_submit_question(memory: Any, question: str) -> Iterator[Dict[str, Any]]
             [{"role": "assistant", "title": "Socratic pass (probing questions)", "content": str(soc_pass)}],
         )
         yield _progress("thoughts", [], label="Generating three exploration paths…")
-        thoughts = socratic.tot_generation(soc_pass, clarified, None)
+        thoughts = socratic.tot_generation(soc_pass, clarified, None, reasoning_policy=policy)
     else:
         yield _progress("socratic_pass", [], label="Generating Socratic pass…")
-        soc_pass = socratic.socratic_pass(clarified)
+        soc_pass = socratic.socratic_pass(clarified, reasoning_policy=policy)
         if not soc_pass or not str(soc_pass).strip():
             raise ValueError("Could not generate socratic questions.")
         yield _progress(
@@ -106,7 +109,7 @@ def iter_submit_question(memory: Any, question: str) -> Iterator[Dict[str, Any]]
                 [{"role": "assistant", "title": "Socratic reasoning", "content": str(soc_answers)}],
             )
         yield _progress("thoughts", [], label="Generating three exploration paths…")
-        thoughts = socratic.tot_generation(soc_pass, clarified, soc_answers)
+        thoughts = socratic.tot_generation(soc_pass, clarified, soc_answers, reasoning_policy=policy)
 
     if not soc_pass or not str(soc_pass).strip():
         raise ValueError("Could not generate socratic questions.")
@@ -200,8 +203,10 @@ def iter_generate_hypothesis(memory: Any) -> Iterator[Dict[str, Any]]:
             "Insufficient context to generate hypothesis. Complete at least one exploration step first."
         )
 
+    reasoning_policy = str(memory.get_var("reasoning_policy") or "auto")
+
     context = _full_context(agent)
-    hypothesis = socratic.hypothesis_synthesis(soc_q, selected, prev1, prev2, context)
+    hypothesis = socratic.hypothesis_synthesis(soc_q, selected, prev1, prev2, context, reasoning_policy=reasoning_policy)
     if hypothesis is None or not str(hypothesis).strip():
         raise ValueError("Error generating hypothesis. Check your API key in Settings.")
 
@@ -256,6 +261,7 @@ def iter_handle_chat_stream(
     action: str,
     question: Optional[str] = None,
     choice: Optional[str] = None,
+    reasoning_policy: str = "auto",
 ) -> Iterator[Dict[str, Any]]:
     if action == "reset":
         yield _complete(reset_session(memory))
@@ -263,7 +269,7 @@ def iter_handle_chat_stream(
     if action == "submit_question":
         if not question:
             raise ValueError("question is required for submit_question")
-        yield from iter_submit_question(memory, question)
+        yield from iter_submit_question(memory, question, reasoning_policy=reasoning_policy)
         return
     if action == "generate_hypothesis":
         yield from iter_generate_hypothesis(memory)
@@ -291,9 +297,10 @@ def iter_sse_events(
     action: str,
     question: Optional[str] = None,
     choice: Optional[str] = None,
+    reasoning_policy: str = "auto",
 ) -> Generator[str, None, None]:
     try:
-        for event in iter_handle_chat_stream(memory, action=action, question=question, choice=choice):
+        for event in iter_handle_chat_stream(memory, action=action, question=question, choice=choice, reasoning_policy=reasoning_policy):
             if event.get("type") == "progress":
                 yield format_sse(
                     "progress",
