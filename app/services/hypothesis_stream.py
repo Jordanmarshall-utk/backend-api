@@ -60,6 +60,7 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
     yield _progress(
         "clarify",
         build_submit_bubbles(clarified, "", None, [])[:1],
+        reasoning_policy=policy,
     )
 
     soc_answers: Optional[str] = None
@@ -308,6 +309,7 @@ def iter_sse_events(
                         "step": event.get("step"),
                         "messages": event.get("messages", []),
                         "label": event.get("label"),
+                        "reasoning_policy": event.get("reasoning_policy"),
                     },
                 )
             elif event.get("type") == "complete":
