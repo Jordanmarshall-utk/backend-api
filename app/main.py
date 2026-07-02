@@ -1,16 +1,18 @@
-from contextlib import asynccontextmanager
-
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import api_router
-from app.core.config import get_settings
-from app.graph.checkpointer import close_checkpointer, init_checkpointer
-from app.graph.pipeline import init_pipeline
-from app.services.memory_service import get_memory_manager
-
+# Must run before any app module imports so os.getenv() module-level calls see .env values.
 load_dotenv()
+
+from contextlib import asynccontextmanager  # noqa: E402
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+from app.api.v1 import api_router  # noqa: E402
+from app.core.config import get_settings  # noqa: E402
+from app.graph.checkpointer import close_checkpointer, init_checkpointer  # noqa: E402
+from app.graph.pipeline import init_pipeline  # noqa: E402
+from app.services.memory_service import get_memory_manager  # noqa: E402
 
 
 @asynccontextmanager
