@@ -155,7 +155,7 @@ def generate_text_with_llm(prompt: str) -> str:
         logging.error(f"Full traceback: {traceback.format_exc()}")
         raise
 
-def clarify_question(question: str) -> str:
+def clarify_question(question: str, reasoning_policy: str = "auto") -> str:
     """Clarifying question given by user """
     try:
         # Lazy import instructions
@@ -168,6 +168,13 @@ def clarify_question(question: str) -> str:
 
         Question: {question}
         """
+        if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
+            clarified_question_prompt, _ = _apply_reasoning_policy(
+                clarified_question_prompt,
+                task=f"Clarify research question: {question[:200]}",
+                task_type="hypothesis",
+                policy=reasoning_policy,
+            )
         llm_response = generate_text_with_llm(clarified_question_prompt)
         if llm_response is None or not llm_response.strip():
             logging.error("LLM returned empty response for clarify_question")
@@ -317,7 +324,7 @@ def _parse_tot_thoughts_from_text(text: str) -> list:
     return thoughts[:3]
 
 
-def socratic_answer_questions(clarified_question: str, probing_questions: str) -> str:
+def socratic_answer_questions(clarified_question: str, probing_questions: str, reasoning_policy: str = "auto") -> str:
     """LLM answers the probing questions it previously asked itself, building deeper reasoning"""
     print("\n" + "="*80)
     print("DEBUG: INSIDE socratic_answer_questions")
@@ -397,12 +404,20 @@ literature evidence from scientific inference. Do not invent citations or metric
         logging.info(f"  Instructions length: {len(SOCRATIC_ANSWER_INSTRUCTIONS)}")
         logging.info(f"  First 300 chars of full prompt: {socratic_answer_prompt[:300]}...")
         
+        if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
+            socratic_answer_prompt, _ = _apply_reasoning_policy(
+                socratic_answer_prompt,
+                task=f"Answer Socratic probing questions for: {clarified_question[:200]}",
+                task_type="hypothesis",
+                policy=reasoning_policy,
+            )
+
         logging.info("Generating answers to socratic questions...")
         logging.info(f"  Clarified question length: {len(clarified_question)}")
         logging.info(f"  Probing questions length: {len(probing_questions)}")
         logging.info(f"  Cleaned questions length: {len(cleaned_questions_text)}")
         logging.info(f"  Cleaned questions preview: {cleaned_questions_text[:500]}...")
-        
+
         try:
             llm_response = generate_text_with_llm(socratic_answer_prompt)
             logging.info(f"LLM call completed successfully")
@@ -796,7 +811,8 @@ def tot_generation(socratic_pass_questioning: str, clarified_question: str, socr
 
 
 def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str, previous_thought_2: str,
-                                   initial_clarified_question: str, conversation_context: str = ""):
+                                   initial_clarified_question: str, conversation_context: str = "",
+                                   reasoning_policy: str = "auto"):
     # produces continuation options based on user's selected option
     try:
         # Lazy import instructions
@@ -837,6 +853,14 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
         - Do NOT ignore the selected option and generate unrelated thoughts
         - Build directly on the materials, mechanisms, or conditions mentioned in the selected option
         """
+
+        if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
+            tot_generation_prompt, _ = _apply_reasoning_policy(
+                tot_generation_prompt,
+                task=f"Deepen hypothesis exploration from: {line_of_thought[:200]}",
+                task_type="hypothesis",
+                policy=reasoning_policy,
+            )
 
         # Log what we're sending to the LLM
         logging.info(f"retry_thinking_deepen_thoughts - Selected option (first 200 chars): {line_of_thought[:200]}")

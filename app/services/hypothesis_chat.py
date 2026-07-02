@@ -151,7 +151,8 @@ def _choose_refine_option(memory: Any, choice: str) -> Dict[str, Any]:
 
     clarified = memory.view_component("clarified_question") or memory.view_component("initial_question")
     context = trim_context(_agent(memory).build_conversation_context())
-    result = socratic.retry_thinking_deepen_thoughts(picked, prev1, prev2, clarified, context)
+    reasoning_policy = str(memory.get_var("reasoning_policy") or "auto")
+    result = socratic.retry_thinking_deepen_thoughts(picked, prev1, prev2, clarified, context, reasoning_policy=reasoning_policy)
 
     if result is None or len(result) != 2:
         soc_q = "How can we continue exploring this hypothesis?"
@@ -245,8 +246,9 @@ def _choose_hypothesis_next_step(memory: Any, choice: str) -> Dict[str, Any]:
     agent = _agent(memory)
     context = trim_context(agent.build_conversation_context())
     clarified = memory.view_component("clarified_question")
+    reasoning_policy = str(memory.get_var("reasoning_policy") or "auto")
     result = socratic.retry_thinking_deepen_thoughts(
-        picked, prev[0], prev[1], clarified, context
+        picked, prev[0], prev[1], clarified, context, reasoning_policy=reasoning_policy
     )
 
     if result is None or len(result) != 2:

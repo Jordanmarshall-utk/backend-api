@@ -27,7 +27,7 @@ class HypothesisAgent(BaseAgent):
         # Low confidence by default (hypothesis agent usually needs user input)
         return 0.3
 
-    def initial_process(self, question, experimental_mode=False, experimental_constraints=None):
+    def initial_process(self, question, experimental_mode=False, experimental_constraints=None, reasoning_policy: str = "auto"):
         socratic = _lazy_import_socratic()
 
         resolved_api_key = (
@@ -46,7 +46,7 @@ class HypothesisAgent(BaseAgent):
             raise ValueError("Question is empty. Provide a valid research question.")
 
         try:
-            clarified_question = socratic.clarify_question(question)
+            clarified_question = socratic.clarify_question(question, reasoning_policy=reasoning_policy)
         except ValueError:
             raise
         except Exception as e:
@@ -59,7 +59,7 @@ class HypothesisAgent(BaseAgent):
             )
 
         try:
-            socratic_questions = socratic.socratic_pass(clarified_question)
+            socratic_questions = socratic.socratic_pass(clarified_question, reasoning_policy=reasoning_policy)
         except Exception as e:
             raise RuntimeError(f"Error generating Socratic questions: {e}") from e
 
@@ -68,7 +68,7 @@ class HypothesisAgent(BaseAgent):
 
         socratic_answers = None
         try:
-            socratic_answers = socratic.socratic_answer_questions(clarified_question, socratic_questions)
+            socratic_answers = socratic.socratic_answer_questions(clarified_question, socratic_questions, reasoning_policy=reasoning_policy)
         except Exception as e:
             raise RuntimeError(f"Error generating Socratic answers: {e}") from e
 
@@ -76,7 +76,7 @@ class HypothesisAgent(BaseAgent):
             thoughts = socratic.tot_generation_experimental_plan(
                 socratic_questions, clarified_question, experimental_constraints)
         else:
-            thoughts = socratic.tot_generation(socratic_questions, clarified_question, socratic_answers)
+            thoughts = socratic.tot_generation(socratic_questions, clarified_question, socratic_answers, reasoning_policy=reasoning_policy)
             if not thoughts:
                 raise RuntimeError("Tree-of-Thought generation returned empty results. Please try again.")
 
@@ -180,7 +180,7 @@ class HypothesisAgent(BaseAgent):
         return "\n".join(parts)
 
     def generate_hypothesis_with_context(self, socratic_question, next_step_option, previous_option_1,
-                                         previous_option_2, conversation_context):
+                                         previous_option_2, conversation_context, reasoning_policy: str = "auto"):
         """ Generate hypothesis with full conversation context """
         try:
             # Include past negative hypotheses so model can learn from them
@@ -194,7 +194,8 @@ class HypothesisAgent(BaseAgent):
                 next_step_option,
                 previous_option_1,
                 previous_option_2,
-                full_context
+                full_context,
+                reasoning_policy=reasoning_policy,
             )
         except Exception as e:
             raise RuntimeError(f"Error generating hypothesis: {str(e)}. Please check your API key and try again.") from e

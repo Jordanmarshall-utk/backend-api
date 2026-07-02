@@ -53,7 +53,7 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
     policy = reasoning_policy or "auto"
     memory.set_var("reasoning_policy", policy)
 
-    clarified = socratic.clarify_question(q)
+    clarified = socratic.clarify_question(q, reasoning_policy=policy)
     if not clarified or not str(clarified).strip():
         raise ValueError("Could not generate clarified question. Check your API key in Settings.")
 
@@ -103,7 +103,7 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
             [{"role": "assistant", "title": "Socratic pass (probing questions)", "content": str(soc_pass)}],
         )
         yield _progress("socratic_answers", [], label="Generating Socratic reasoning…")
-        soc_answers = socratic.socratic_answer_questions(clarified, soc_pass)
+        soc_answers = socratic.socratic_answer_questions(clarified, soc_pass, reasoning_policy=policy)
         if soc_answers and str(soc_answers).strip():
             yield _progress(
                 "socratic_answers",
