@@ -117,7 +117,7 @@ class CurveFittingAgent(BaseAgent):
             )
         return self.llm_client
 
-    def confidence(self, payload: Dict[str, Any]) -> float:
+    def confidence(self, params: Dict[str, Any]) -> float:
         """Return confidence score for curve fitting tasks."""
         try:
             # High confidence if auto-triggered from watcher with data file

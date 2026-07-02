@@ -16,13 +16,13 @@ class FallbackAgent(BaseAgent):
         super().__init__(name, desc or "Handles routing failures and provides error recovery")
         self.memory = MemoryManager()
 
-    def confidence(self, payload: Dict[str, Any]) -> float:
+    def confidence(self, params: Dict[str, Any]) -> float:
         """
         Fallback agent has low confidence by default - it should only be used
         when no other agent can handle the request.
         """
         # Only confident if explicitly requested as fallback
-        if payload.get("force_fallback") or payload.get("error_occurred"):
+        if params.get("force_fallback") or params.get("error_occurred"):
             return 1.0
         return 0.0
 

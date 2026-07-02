@@ -211,6 +211,8 @@ class ExperimentAgent(BaseAgent):
 
     def upload_to_jupyter(self, server_url, token, file_content, filename, notebook_path):
         """Upload file to Jupyter server using Jupyter API"""
+        if requests is None:
+            return False, "requests library is not installed"
         try:
             # Clean up URL
             server_url = server_url.rstrip('/')

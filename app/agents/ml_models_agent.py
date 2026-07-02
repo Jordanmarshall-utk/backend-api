@@ -13,15 +13,15 @@ class MLModelsAgent(BaseAgent):
         super().__init__(name, desc)
         self.memory = MemoryManager()
 
-    def confidence(self, payload: Dict[str, Any]) -> float:
+    def confidence(self, params: Dict[str, Any]) -> float:
         conf = 0.1
-        if payload and isinstance(payload, dict):
-            action = payload.get("action") or payload.get("next_agent")
+        if params and isinstance(params, dict):
+            action = params.get("action") or params.get("next_agent")
             if str(action).lower() in {"ml_models", "ml", "ml_models_agent"}:
                 conf = 0.8
-            if payload.get("results_json") or payload.get("json_path"):
+            if params.get("results_json") or params.get("json_path"):
                 conf = max(conf, 0.6)
-            if payload.get("results_csv") or payload.get("csv_path"):
+            if params.get("results_csv") or params.get("csv_path"):
                 conf = max(conf, 0.6)
 
         if self.memory.get_var("ml_auto_json_path") or self.memory.get_var("ml_auto_csv_path"):
