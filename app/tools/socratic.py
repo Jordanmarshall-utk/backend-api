@@ -23,6 +23,7 @@ _edison_client = None
 _edison_models = None
 _given_vars = None
 _reasoning_layer_build_fn = None
+_reasoning_layer_gen_fn = None
 
 
 def _lazy_import_reasoning_layer():
@@ -49,6 +50,57 @@ def _apply_reasoning_policy(base_prompt: str, task: str, task_type: str, policy:
     except Exception as exc:
         logging.warning(f"Reasoning policy layer unavailable, using base prompt: {exc}")
         return base_prompt, {"reasoning_layer_enabled": False}
+
+
+def _lazy_import_reasoning_gen():
+    global _reasoning_layer_gen_fn
+    if _reasoning_layer_gen_fn is None:
+        from app.tools.scientific_reasoning_policy_layer import generate_with_reasoning
+        _reasoning_layer_gen_fn = generate_with_reasoning
+    return _reasoning_layer_gen_fn
+
+
+def _log_reasoning_metadata(metadata: dict, fn_name: str = "") -> None:
+    """Persist reasoning metadata to a sidecar log without affecting return values."""
+    try:
+        import time
+        from app.tools.scientific_reasoning_policy_layer import dump_reasoning_metadata_json
+        log_dir = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "reasoning")
+        os.makedirs(log_dir, exist_ok=True)
+        path = os.path.join(log_dir, f"reasoning_{fn_name}_{int(time.time() * 1000)}.json")
+        dump_reasoning_metadata_json(metadata, path)
+    except Exception:
+        pass
+
+
+def _generate_with_reasoning_wrapper(
+    base_prompt: str,
+    task: str,
+    task_type: str,
+    policy: str = "auto",
+    fn_name: str = "",
+) -> dict:
+    """
+    Full generate_with_reasoning integration for literature-consuming LLM calls.
+    Falls back to plain generate_text_with_llm if the layer is unavailable.
+    Saves reasoning_metadata to a sidecar log; never modifies the str response.
+    Returns a dict with at least a 'response' key.
+    """
+    try:
+        gen_fn = _lazy_import_reasoning_gen()
+        result = gen_fn(
+            generate_text_fn=generate_text_with_llm,
+            base_prompt=base_prompt,
+            task=task,
+            agent_name="Literature Agent",
+            task_type=task_type,
+            policy=policy,
+        )
+        _log_reasoning_metadata(result.get("reasoning_metadata", {}), fn_name=fn_name)
+        return result
+    except Exception as exc:
+        logging.warning("generate_with_reasoning unavailable for %s, using base prompt: %s", fn_name, exc)
+        return {"response": generate_text_with_llm(base_prompt), "reasoning_metadata": {}}
 
 # Initialize API key from environment
 QWEN_API_KEY = (
@@ -169,12 +221,13 @@ def clarify_question(question: str, reasoning_policy: str = "auto") -> str:
         Question: {question}
         """
         if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
-            clarified_question_prompt, _ = _apply_reasoning_policy(
+            clarified_question_prompt, _reasoning_meta = _apply_reasoning_policy(
                 clarified_question_prompt,
                 task=f"Clarify research question: {question[:200]}",
                 task_type="hypothesis",
                 policy=reasoning_policy,
             )
+            _log_reasoning_metadata(_reasoning_meta, fn_name="clarify_question")
         llm_response = generate_text_with_llm(clarified_question_prompt)
         if llm_response is None or not llm_response.strip():
             logging.error("LLM returned empty response for clarify_question")
@@ -209,12 +262,13 @@ def socratic_pass(clarified_question_response: str, reasoning_policy: str = "aut
         """
 
         if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
-            socratic_pass_prompt, _ = _apply_reasoning_policy(
+            socratic_pass_prompt, _reasoning_meta = _apply_reasoning_policy(
                 socratic_pass_prompt,
                 task=f"Apply probing questions to: {clarified_question_response[:300]}",
                 task_type="gap_analysis",
                 policy=reasoning_policy,
             )
+            _log_reasoning_metadata(_reasoning_meta, fn_name="socratic_pass")
 
         llm_response = generate_text_with_llm(socratic_pass_prompt)
         return llm_response
@@ -261,12 +315,13 @@ Required format:
 <third thought>
 """
         if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
-            combined_prompt, _ = _apply_reasoning_policy(
+            combined_prompt, _reasoning_meta = _apply_reasoning_policy(
                 combined_prompt,
                 task=f"Apply probing questions and generate exploration paths for: {clarified_question[:200]}",
                 task_type="gap_analysis",
                 policy=reasoning_policy,
             )
+            _log_reasoning_metadata(_reasoning_meta, fn_name="socratic_pass_and_tot")
 
         llm_response = generate_text_with_llm(combined_prompt)
         if not llm_response or not str(llm_response).strip():
@@ -404,14 +459,6 @@ literature evidence from scientific inference. Do not invent citations or metric
         logging.info(f"  Instructions length: {len(SOCRATIC_ANSWER_INSTRUCTIONS)}")
         logging.info(f"  First 300 chars of full prompt: {socratic_answer_prompt[:300]}...")
         
-        if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
-            socratic_answer_prompt, _ = _apply_reasoning_policy(
-                socratic_answer_prompt,
-                task=f"Answer Socratic probing questions for: {clarified_question[:200]}",
-                task_type="hypothesis",
-                policy=reasoning_policy,
-            )
-
         logging.info("Generating answers to socratic questions...")
         logging.info(f"  Clarified question length: {len(clarified_question)}")
         logging.info(f"  Probing questions length: {len(probing_questions)}")
@@ -419,7 +466,14 @@ literature evidence from scientific inference. Do not invent citations or metric
         logging.info(f"  Cleaned questions preview: {cleaned_questions_text[:500]}...")
 
         try:
-            llm_response = generate_text_with_llm(socratic_answer_prompt)
+            _wrapped = _generate_with_reasoning_wrapper(
+                base_prompt=socratic_answer_prompt,
+                task=f"Answer Socratic probing questions for: {clarified_question[:200]}",
+                task_type="hypothesis",
+                policy=reasoning_policy,
+                fn_name="socratic_answer_questions",
+            )
+            llm_response = _wrapped["response"]
             logging.info(f"LLM call completed successfully")
         except Exception as llm_error:
             logging.error(f"LLM call failed with error: {llm_error}")
@@ -615,25 +669,19 @@ def tot_generation(socratic_pass_questioning: str, clarified_question: str, socr
         allowed, but label them as hypotheses rather than established findings.
         """
 
-        if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
-            tot_generation_prompt, _ = _apply_reasoning_policy(
-                tot_generation_prompt,
-                task=f"Generate three exploration paths for: {clarified_question[:300]}",
-                task_type="hypothesis",
-                policy=reasoning_policy,
-            )
-
         if socratic_answers:
             logging.info(f"Generating TOT with socratic answers (length: {len(socratic_answers)})...")
         else:
             logging.info(f"Generating TOT with probing questions (answers not available)...")
 
-        if socratic_answers:
-            logging.info(f"Generating TOT with socratic answers (length: {len(socratic_answers)})...")
-        else:
-            logging.info(f"Generating TOT with probing questions (answers not available)...")
-
-        llm_response = generate_text_with_llm(tot_generation_prompt)
+        _wrapped = _generate_with_reasoning_wrapper(
+            base_prompt=tot_generation_prompt,
+            task=f"Generate three exploration paths for: {clarified_question[:300]}",
+            task_type="hypothesis",
+            policy=reasoning_policy,
+            fn_name="tot_generation",
+        )
+        llm_response = _wrapped["response"]
 
         if isinstance(llm_response, list):
             llm_response = " ".join(llm_response)  # combine if list
@@ -855,12 +903,13 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
         """
 
         if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
-            tot_generation_prompt, _ = _apply_reasoning_policy(
+            tot_generation_prompt, _reasoning_meta = _apply_reasoning_policy(
                 tot_generation_prompt,
                 task=f"Deepen hypothesis exploration from: {line_of_thought[:200]}",
                 task_type="hypothesis",
                 policy=reasoning_policy,
             )
+            _log_reasoning_metadata(_reasoning_meta, fn_name="retry_thinking_deepen_thoughts")
 
         # Log what we're sending to the LLM
         logging.info(f"retry_thinking_deepen_thoughts - Selected option (first 200 chars): {line_of_thought[:200]}")
@@ -1240,15 +1289,14 @@ def hypothesis_synthesis(socratic_question: str, next_step_option: str, previous
             and explicitly label any unsupported extrapolation as a proposed mechanism.
             """
 
-        if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
-            hypothesis_synthesis_prompt, _ = _apply_reasoning_policy(
-                hypothesis_synthesis_prompt,
-                task=f"Synthesize hypothesis from: {next_step_option[:300]}",
-                task_type="hypothesis",
-                policy=reasoning_policy,
-            )
-
-        llm_response = generate_text_with_llm(hypothesis_synthesis_prompt)
+        _wrapped = _generate_with_reasoning_wrapper(
+            base_prompt=hypothesis_synthesis_prompt,
+            task=f"Synthesize hypothesis from: {next_step_option[:300]}",
+            task_type="hypothesis",
+            policy=reasoning_policy,
+            fn_name="hypothesis_synthesis",
+        )
+        llm_response = _wrapped["response"]
 
         if llm_response is None or not llm_response.strip():
             return "Error generating hypothesis. Please check your API key and try again."
@@ -1389,11 +1437,17 @@ def local_hypothesis_analysis_fallback(hypothesis: str, socratic_question: str) 
         not invent claims that are absent from the supplied context.
         """
 
-        llm_response = generate_text_with_llm(hypothesis_analysis_report_prompt)
+        _wrapped = _generate_with_reasoning_wrapper(
+            base_prompt=hypothesis_analysis_report_prompt,
+            task=f"Analyze hypothesis against literature evidence: {hypothesis[:200]}",
+            task_type="hypothesis",
+            policy="auto",
+            fn_name="local_hypothesis_analysis_fallback",
+        )
+        llm_response = _wrapped["response"]
 
         return llm_response
 
     except Exception as e:
         logging.error(f"Hypothesis Analysis Report generation failed: {e}")
-        # Fallback: return a simple error message
         return f"Error generating hypothesis analysis: {str(e)}. Please check your API key and try again."
