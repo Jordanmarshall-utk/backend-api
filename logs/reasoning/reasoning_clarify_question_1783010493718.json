@@ -1,0 +1,18 @@
+{
+  "reasoning_layer_enabled": true,
+  "reasoning_policy": "socratic_uncertainty",
+  "reasoning_policy_short_name": "Socratic",
+  "reasoning_policy_confidence": 0.768,
+  "reasoning_policy_reason": "agent prior=hypothesis_agent; task type prior=hypothesis; matched keywords=hypothesis, test, question",
+  "matched_keywords": [
+    "hypothesis",
+    "test",
+    "question"
+  ],
+  "secondary_policy_ids": [
+    "humean_evidence",
+    "kantian_constraints"
+  ],
+  "agent_name": "Hypothesis Agent",
+  "task_type": "hypothesis"
+}

@@ -235,15 +235,13 @@ def clarify_question(question: str, reasoning_policy: str = "auto") -> str:
         return llm_response
 
     except ValueError as e:
-        # API key error - re-raise with clear message
         logging.error(f"API key error in clarify_question: {e}")
         raise
     except Exception as e:
-        logging.error(f"LLM clarifying question failed: {e}")
-        logging.error(f"Error type: {type(e).__name__}")
         import traceback
+        logging.error(f"LLM clarifying question failed ({type(e).__name__}): {e}")
         logging.error(f"Traceback: {traceback.format_exc()}")
-        return None
+        raise ValueError(f"Clarify question failed: {e}") from e
 
 
 def socratic_pass(clarified_question_response: str, reasoning_policy: str = "auto") -> str:
