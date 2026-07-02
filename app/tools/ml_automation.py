@@ -2,6 +2,7 @@
 Automated ML model execution after curve fitting completes.
 This module handles automatic ML model training based on workflow configuration.
 """
+from __future__ import annotations
 
 import os
 import json

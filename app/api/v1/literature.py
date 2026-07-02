@@ -1,4 +1,5 @@
 """FastAPI router — Literature Agent endpoints."""
+from __future__ import annotations
 
 import re
 from typing import Annotated

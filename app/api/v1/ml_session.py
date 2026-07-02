@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Annotated, Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile

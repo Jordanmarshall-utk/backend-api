@@ -2,6 +2,7 @@
 Experiment Memory System - Tracks completed experiments to prevent duplicates
 and enable automated workflow memory.
 """
+from __future__ import annotations
 
 import json
 import logging
