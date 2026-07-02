@@ -7,6 +7,7 @@ from app.tools.mcp_orchestrator_bridge import sync_hypothesis_outcome
 from app.tools.memory import MemoryManager
 from app.tools.experiment_memory import get_experiment_memory
 
+
 # Lazy import socratic module - only import when needed
 _socratic_module = None
 
