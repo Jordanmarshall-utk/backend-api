@@ -3,9 +3,7 @@ import json
 import os
 
 from app.agents.base import BaseAgent
-from app.tools.mcp_orchestrator_bridge import sync_hypothesis_outcome
 from app.tools.memory import MemoryManager
-from app.tools.experiment_memory import get_experiment_memory
 
 
 # Lazy import socratic module - only import when needed
@@ -30,7 +28,7 @@ class AnalysisAgent(BaseAgent):
         super().__init__(name, desc)
         self.memory = MemoryManager()
     
-    def confidence(self, payload: Dict[str, Any]) -> float:
+    def confidence(self, params: Dict[str, Any]) -> float:
         """
         Return confidence score for analysis tasks.
         High confidence when curve fitting or ML results are available.
@@ -218,7 +216,7 @@ class AnalysisAgent(BaseAgent):
                 pred = sc.get('predicted_value', 'N/A')
                 unc = sc.get('uncertainty', 'N/A')
                 acq = sc.get('acquisition_score', 'N/A')
-                comp_str = ", ".join(f"{k}={v:.2f}" for k, v in comps.items()) if isinstance(comps, dict) else str(comps)
+                comp_str = ", ".join(f"{k}={v:.2f}" if isinstance(v, (int, float)) else f"{k}={v}" for k, v in comps.items()) if isinstance(comps, dict) else str(comps)
                 summary_parts.append(f"  {i}. {comp_str} | pred={pred}, unc={unc}, acq={acq}\n")
         
         return "\n".join(summary_parts)
@@ -233,9 +231,12 @@ class AnalysisAgent(BaseAgent):
         stats = mc_results.get("optimization_stats", {})
         if stats:
             summary_parts.append(f"**Total Cycles:** {stats.get('total_cycles', 'N/A')}\n")
-            summary_parts.append(f"**Best Quality Achieved:** {stats.get('best_quality', 'N/A'):.2f}\n")
-            summary_parts.append(f"**Total Improvement:** {stats.get('total_improvement_pct', 'N/A'):+.2f}%\n")
-            summary_parts.append(f"**Average Improvement/Cycle:** {stats.get('avg_improvement_per_cycle_pct', 'N/A'):+.2f}%\n")
+            best_q = stats.get('best_quality')
+            summary_parts.append(f"**Best Quality Achieved:** {best_q:.2f if isinstance(best_q, (int, float)) else best_q or 'N/A'}\n")
+            total_imp = stats.get('total_improvement_pct')
+            summary_parts.append(f"**Total Improvement:** {f'{total_imp:+.2f}%' if isinstance(total_imp, (int, float)) else 'N/A'}\n")
+            avg_imp = stats.get('avg_improvement_per_cycle_pct')
+            summary_parts.append(f"**Average Improvement/Cycle:** {f'{avg_imp:+.2f}%' if isinstance(avg_imp, (int, float)) else 'N/A'}\n")
         
         # Top candidates
         top_candidates = mc_results.get("top_candidates", [])

@@ -1,9 +1,7 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import os
 
 from app.agents.base import BaseAgent
-
-from app.tools.mcp_orchestrator_bridge import sync_hypothesis_outcome, sync_hypothesis_proposal
 from app.tools.memory import MemoryManager
 
 # Lazy import socratic module - only import when needed
@@ -19,12 +17,12 @@ def _lazy_import_socratic():
 
 class HypothesisAgent(BaseAgent):
     def __init__(self, name, desc, question: str):
-        super().__init__("Hypothesis Agent", desc)
+        super().__init__(name, desc)
         self.question = question
         self.memory = MemoryManager()
         # Don't import socratic here - lazy load when needed
 
-    def confidence(self, payload: Dict[str, Any]) -> float:
+    def confidence(self, params: Dict[str, Any]) -> float:
         """Return confidence score for hypothesis tasks."""
         # Low confidence by default (hypothesis agent usually needs user input)
         return 0.3
@@ -38,6 +36,7 @@ class HypothesisAgent(BaseAgent):
             or os.getenv("HF_API_KEY")
             or os.getenv("LLM_API_KEY")
             or os.getenv("DASHSCOPE_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
         )
 
         if not resolved_api_key:
@@ -86,7 +85,7 @@ class HypothesisAgent(BaseAgent):
 
         return clarified_question, socratic_questions, thoughts[:3], socratic_answers
 
-    def build_conversation_context(self, prompt_session_id: str = None):
+    def build_conversation_context(self, prompt_session_id: Optional[str] = None):
         """ Build full conversation context from all interactions """
         if prompt_session_id is None:
             try:
@@ -147,6 +146,8 @@ class HypothesisAgent(BaseAgent):
         """ Get context from previous conversations for follow-up questions """
         if self.memory.get_var("conversation_events", []):
             latest = self.memory.get_latest_history()
+            if not latest:
+                return ""
             payload = latest.get("payload", {})
             context = f"Previous question: {payload.get('question', '')}\n"
             if payload.get("thoughts"):
