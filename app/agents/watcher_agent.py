@@ -83,11 +83,3 @@ class WatcherAgent(BaseAgent):
             mode="watcher",
         )
         
-        # In a Streamlit context, we might want to show UI feedback
-        # In a background context, we just log
-        try:
-            import streamlit as st
-            st.info("Watcher Agent detected a file change. Routing to next agent...")
-        except (ImportError, RuntimeError):
-            # Not in Streamlit context - just log
-            pass

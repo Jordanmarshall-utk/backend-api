@@ -222,18 +222,6 @@ def get_experiment_memory(memory_manager=None) -> ExperimentMemory:
         except (RuntimeError, AttributeError):
             pass
 
-    # Streamlit fallback when no memory_manager provided
-    try:
-        import streamlit as st
-        if "experiment_memory" not in st.session_state:
-            memory_file = st.session_state.get("experiment_memory_file", "experiment_memory.json")
-            data_dir = st.session_state.get("experiment_data_dir", "data")
-            st.session_state.experiment_memory = ExperimentMemory(
-                memory_file=memory_file,
-                memory_dir=data_dir,
-            )
-        return st.session_state.experiment_memory
-    except (RuntimeError, AttributeError, ImportError):
-        return ExperimentMemory()
+    return ExperimentMemory()
 
 

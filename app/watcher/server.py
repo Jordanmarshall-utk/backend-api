@@ -28,11 +28,6 @@ from watchdog.observers import Observer
 from app.tools.memory import MemoryManager
 from app.agents.router import AgentRouter
 
-# Suppress Streamlit warnings when running in headless mode
-warnings.filterwarnings("ignore", category=UserWarning, module="streamlit")
-warnings.filterwarnings("ignore", message=".*ScriptRunContext.*")
-warnings.filterwarnings("ignore", message=".*Session state.*")
-
 # Configure logging with more verbose output to console
 logging.basicConfig(
     level=logging.INFO,
@@ -88,12 +83,6 @@ def log_and_print(message: str, level: str = "INFO"):
     elif level == "DEBUG":
         logger.debug(message)
         safe_print(f"[DEBUG] {message}")
-
-# Suppress Streamlit-related log messages
-logging.getLogger("streamlit").setLevel(logging.ERROR)
-logging.getLogger("streamlit.runtime").setLevel(logging.ERROR)
-logging.getLogger("streamlit.runtime.scriptrunner_utils").setLevel(logging.ERROR)
-logging.getLogger("streamlit.runtime.state").setLevel(logging.ERROR)
 
 # Ensure API key is available from environment for headless mode
 def _ensure_api_key():

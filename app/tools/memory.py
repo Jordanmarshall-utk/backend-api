@@ -11,17 +11,6 @@ import os
 import threading
 import uuid
 
-# Lazy import streamlit to avoid issues in headless mode
-try:
-    import streamlit as st
-    from streamlit.errors import StreamlitSecretNotFoundError
-
-    STREAMLIT_AVAILABLE = True
-except (ImportError, RuntimeError):
-    STREAMLIT_AVAILABLE = False
-    st = None
-    StreamlitSecretNotFoundError = Exception  # type: ignore[misc, assignment]
-
 from app.tools.database import DEFAULT_SESSION_STATE, DatabaseManager
 from app.tools.paths import get_env_path, get_user_data_dir
 from app.tools.runtime_state import clear_ephemeral, get as runtime_get, is_runtime_key, set as runtime_set
@@ -43,13 +32,6 @@ class MemoryManager:
                     self._db.ensure_defaults()
                     _defaults_ready = True
 
-        if STREAMLIT_AVAILABLE and st is not None:
-            try:
-                if st.session_state.get("_polaris_memory_initialized", False):
-                    return
-            except (AttributeError, RuntimeError):
-                pass
-
         clear_ephemeral()
 
         # Set start_time if not present
@@ -67,7 +49,6 @@ class MemoryManager:
         except ImportError:
             pass
 
-        # API key: env vars for headless API; Streamlit secrets when UI is available
         from app.tools.llm_client import resolve_api_key
 
         api_key_source = self._db.get("api_key_source", "")
@@ -77,26 +58,6 @@ class MemoryManager:
             if env_key:
                 self._db.set("api_key", env_key)
                 self._db.set("api_key_source", "environment")
-            elif STREAMLIT_AVAILABLE and st is not None and not self._db.get("api_key"):
-                try:
-                    api_key = (
-                        st.secrets.get("HUGGINGFACE_API_KEY")
-                        or st.secrets.get("HF_API_KEY")
-                        or st.secrets.get("DASHSCOPE_API_KEY")
-                    )
-                    if api_key:
-                        self._db.set("api_key", api_key)
-                        self._db.set("api_key_source", "secrets")
-                except (AttributeError, RuntimeError, StreamlitSecretNotFoundError, KeyError):
-                    pass
-
-        self._sync_llm_env()
-
-        if STREAMLIT_AVAILABLE and st is not None:
-            try:
-                st.session_state["_polaris_memory_initialized"] = True
-            except (AttributeError, RuntimeError):
-                pass
 
         self._sync_llm_env()
 

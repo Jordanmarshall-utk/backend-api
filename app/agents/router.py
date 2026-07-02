@@ -7,15 +7,6 @@ from app.tools import socratic
 
 logger = logging.getLogger(__name__)
 
-# Lazy import streamlit to avoid issues in headless mode
-try:
-    import streamlit as st
-    STREAMLIT_AVAILABLE = True
-except (ImportError, RuntimeError):
-    STREAMLIT_AVAILABLE = False
-    st = None
-
-
 class AgentRouter:
     """
     Central router coordinating which agent should run next.
@@ -105,14 +96,6 @@ Return ONLY the exact name of the chosen agent from the list above, with no expl
             choice_raw = socratic.generate_text_with_llm(prompt).strip()
         except Exception as e:
             logger.warning(f"Unable to generate agent name from LLM: {e}")
-            # Only show Streamlit warning if we're actually in a Streamlit context
-            # Don't try to import st again - use the module-level one if available
-            try:
-                if STREAMLIT_AVAILABLE and st is not None and hasattr(st, 'warning'):
-                    st.warning(f"Unable to generate agent name from LLM. Try again. Error: {e}")
-            except (RuntimeError, AttributeError, NameError):
-                # st might not be available in headless mode
-                pass
             return None
 
         # Normalise and try to map back to a known agent
@@ -289,13 +272,6 @@ Return ONLY the exact name of the chosen agent from the list above, with no expl
         # If all agents are uncertain, fall back
         if score is None or score < 0.4:
             if self.fallback_agent:
-                try:
-                    if STREAMLIT_AVAILABLE and hasattr(st, 'session_state'):
-                        counts = memory.get_var("agent_usage_counts", {})
-                        counts["router"] = counts.get("router", 0) + 1
-                        memory.set_var("agent_usage_counts", counts)
-                except (RuntimeError, AttributeError):
-                    pass
                 return self.fallback_agent.run_agent(memory)
             raise RuntimeError("No agent is confident enough.")
 

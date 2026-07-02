@@ -23,7 +23,7 @@ _edison_client = None
 _edison_models = None
 _given_vars = None
 
-# Initialize API key from environment - will be updated by streamlit_app if needed
+# Initialize API key from environment
 QWEN_API_KEY = (
     os.getenv("HUGGINGFACE_API_KEY")
     or os.getenv("HF_API_KEY")

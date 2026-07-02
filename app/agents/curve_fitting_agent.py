@@ -7,12 +7,6 @@ from app.tools.fitting_agent import (
 )
 from app.tools.memory import MemoryManager
 
-try:
-    import streamlit as st
-    STREAMLIT_AVAILABLE = True
-except (ImportError, RuntimeError):
-    STREAMLIT_AVAILABLE = False
-    st = None
 import os
 import tempfile
 import json
@@ -20,7 +14,6 @@ import re
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
 import numpy as np
 import base64
 
@@ -53,72 +46,6 @@ def _sort_wells(wells: List[str]) -> List[str]:
     
     return sorted(wells, key=well_key)
 
-
-def _display_fitting_plot(result: Dict[str, Any], container, well_name: str):
-    """Display fitting plot in real-time during analysis."""
-    try:
-        # Try to load from saved plot file first
-        if 'files' in result and 'fitting_plot' in result['files']:
-            plot_path = result['files']['fitting_plot']
-            if os.path.exists(plot_path):
-                with container:
-                    read_info = f" Read {result.get('read', '')}" if result.get('read') else ""
-                    st.subheader(f"📊 Well {well_name}{read_info} - R²: {result['fit_result'].stats.r2:.4f}")
-                    img = mpimg.imread(plot_path)
-                    st.image(img, caption=f"Fitting plot for well {well_name}{read_info}", width="stretch")
-                    return
-        
-        # If no saved plot, create one on-the-fly from data
-        if 'data' in result and 'fit_result' in result:
-            x = result['data']['x']
-            y = result['data']['y']
-            fit_result = result['fit_result']
-            
-            # Create plot
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-            
-            # Top plot: data and fit
-            ax1.plot(x, y, 'b-', label='Data', linewidth=1.5, alpha=0.7)
-            if fit_result.lmfit_result is not None:
-                ax1.plot(x, fit_result.lmfit_result.best_fit, 'r-', label='Fit', linewidth=2)
-            
-            # Plot individual peaks if available
-            if fit_result.peaks:
-                for i, peak in enumerate(fit_result.peaks):
-                    if hasattr(peak, 'center') and fit_result.lmfit_result is not None:
-                        # Create peak curve
-                        peak_curve = _create_peak_curve(x, peak, fit_result.lmfit_result)
-                        if peak_curve is not None:
-                            ax1.plot(x, peak_curve, '--', alpha=0.6, label=f'Peak {i+1}')
-            
-            ax1.set_xlabel('Wavelength (nm)')
-            ax1.set_ylabel('Intensity')
-            ax1.set_title(f'Peak Fitting - Well {well_name} (R² = {fit_result.stats.r2:.4f})')
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
-            
-            # Bottom plot: residuals
-            if fit_result.lmfit_result is not None:
-                residuals = y - fit_result.lmfit_result.best_fit
-                ax2.plot(x, residuals, 'g-', linewidth=1)
-                ax2.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-                ax2.set_xlabel('Wavelength (nm)')
-                ax2.set_ylabel('Residuals')
-                ax2.set_title('Residuals')
-                ax2.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            
-            # Display in Streamlit
-            with container:
-                read_info = f" Read {result.get('read', '')}" if result.get('read') else ""
-                st.subheader(f"📊 Well {well_name}{read_info} - R²: {fit_result.stats.r2:.4f}")
-                st.pyplot(fig)
-                plt.close(fig)
-    except Exception as e:
-        # If plotting fails, just show a message
-        with container:
-            st.warning(f"Could not display plot for well {well_name}: {str(e)}")
 
 
 def _create_peak_curve(x: np.ndarray, peak, lmfit_result) -> Optional[np.ndarray]:
@@ -154,14 +81,10 @@ class CurveFittingAgent(BaseAgent):
         import logging
         logger = logging.getLogger(__name__)
         
-        # Get delay from provided value, session state, or default
+        # Get delay from provided value or session state
         delay = min_delay_seconds
         if delay is None:
-            try:
-                import streamlit as st
-                delay = self.memory.get_var("llm_delay_seconds", 0.5)
-            except (ImportError, RuntimeError, AttributeError):
-                delay = 0.5  # Default in headless mode
+            delay = self.memory.get_var("llm_delay_seconds", 0.5)
         
         # API key from memory (web settings) or environment
         api_key = None
@@ -223,13 +146,7 @@ class CurveFittingAgent(BaseAgent):
         import logging
         logger = logging.getLogger(__name__)
 
-        if not STREAMLIT_AVAILABLE or st is None:
-            data_file = (payload or {}).get("data_file") or (payload or {}).get("trigger_file")
-            return {
-                "status": "ready",
-                "message": "Use POST /api/v1/agents/curve-fitting to run curve fitting.",
-                "data_file": data_file,
-            }
+        data_file = (payload or {}).get("data_file") or (payload or {}).get("trigger_file")
 
         logger.info("CurveFittingAgent.run_agent called with payload: %s", payload is not None)
         
@@ -471,9 +388,6 @@ class CurveFittingAgent(BaseAgent):
                 curated, filtered_reads = self._curate_dataset_with_read_type(config, read_type, read_selection_for_filtering, auto_trigger=auto_trigger)
                 # Use the filtered reads for analysis
                 actual_reads_to_analyze = filtered_reads
-                if hasattr(st, 'info'):
-                    st.info(f"📊 Filtered to {len(filtered_reads)} {read_type} reads: {filtered_reads}")
-                logger.info(f"Final reads to analyze: {filtered_reads} (from original selection: {reads_to_analyze}, auto_trigger: {auto_trigger})")
                 logger.info(f"Final reads to analyze: {filtered_reads} (from original selection: {reads_to_analyze}, auto_trigger: {auto_trigger})")
             else:
                 from app.tools.fitting_agent import CurveFitting
@@ -482,19 +396,10 @@ class CurveFittingAgent(BaseAgent):
                 actual_reads_to_analyze = reads_to_analyze
 
             available_wells = curated["wells"]
-            
-            # Debug: Check what wells were found
-            st.info(f"🔍 Debug: Found {len(available_wells)} wells in curated dataset: {available_wells[:10]}{'...' if len(available_wells) > 10 else ''}")
-            
+            logger.info(f"Found {len(available_wells)} wells in curated dataset: {available_wells[:10]}{'...' if len(available_wells) > 10 else ''}")
+
             if not available_wells:
-                st.error(f"❌ No wells found in curated dataset! Available reads: {curated.get('reads', [])}")
-                st.error("This usually means the CSV format isn't being parsed correctly.")
-                st.error("Please check that your Excel file has the correct format:")
-                st.error("- Column 0: Wavelength values")
-                st.error("- Columns 1+: Each column is a read/acquisition")
-                st.error("\nDebug info:")
-                st.error(f"- Total reads found: {len(curated.get('reads', []))}")
-                # Try to get more debug info
+                logger.error(f"No wells found in curated dataset! Available reads: {curated.get('reads', [])}")
                 try:
                     from app.tools.fitting_agent import CurveFitting
                     agent = CurveFitting(config)
@@ -503,10 +408,9 @@ class CurveFittingAgent(BaseAgent):
                     if all_blocks:
                         first_read = list(all_blocks.keys())[0]
                         first_block = all_blocks[first_read]
-                        st.error(f"- First read ({first_read}) columns: {list(first_block.columns)}")
-                        st.error(f"- First read shape: {first_block.shape}")
+                        logger.error(f"First read ({first_read}) columns: {list(first_block.columns)}, shape: {first_block.shape}")
                 except Exception as e:
-                    st.error(f"- Could not get debug info: {e}")
+                    logger.error(f"Could not get debug info: {e}")
                 raise ValueError(
                     "No wells found in curated dataset. Check CSV format (wavelength column + read columns) "
                     f"and composition file. Reads found: {curated.get('reads', [])}"
@@ -527,22 +431,15 @@ class CurveFittingAgent(BaseAgent):
             if not wells_to_process:
                 raise ValueError(f"No valid wells found to analyze. Available wells: {available_wells}")
 
-            st.info(f"Starting analysis of {len(wells_to_process)} wells: {wells_to_process}")
+            logger.info(f"Starting analysis of {len(wells_to_process)} wells: {wells_to_process}")
 
             # Analyze each well
             all_results = []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
 
-            # Create a container for real-time plots
-            plot_container = st.container()
-            
             for i, well_name in enumerate(wells_to_process):
-                status_text.text(f"Analyzing well {well_name} ({i+1}/{len(wells_to_process)})")
-                progress_bar.progress((i) / len(wells_to_process))
+                logger.info(f"Analyzing well {well_name} ({i+1}/{len(wells_to_process)})")
 
                 try:
-                    # Run complete analysis for this well using the FILTERED reads
                     result = run_complete_analysis(
                         config=config,
                         well_name=well_name,
@@ -555,25 +452,16 @@ class CurveFittingAgent(BaseAgent):
                         save_plots=save_plots
                     )
 
-                    # Handle both single result and list of results (multiple reads)
                     if isinstance(result, list):
-                        for r in result:
-                            all_results.append(r)
-                            # Display plot for each read result
-                            _display_fitting_plot(r, plot_container, well_name)
+                        all_results.extend(result)
                     else:
                         all_results.append(result)
-                        # Display plot for single result
-                        _display_fitting_plot(result, plot_container, well_name)
 
                 except Exception as e:
-                    st.error(f"Error analyzing well {well_name}: {str(e)}")
-                    import traceback
-                    st.exception(e)
+                    logger.error(f"Error analyzing well {well_name}: {str(e)}", exc_info=True)
                     continue
 
-            progress_bar.progress(1.0)
-            status_text.text("Analysis complete!")
+            logger.info("Analysis complete!")
 
             # Save consolidated results
             if all_results:
@@ -689,7 +577,7 @@ class CurveFittingAgent(BaseAgent):
 
         except Exception as e:
             error_msg = str(e)
-            st.error(f"Curve fitting analysis failed: {error_msg}")
+            logger.error(f"Curve fitting analysis failed: {error_msg}", exc_info=True)
             return {
                 "success": False,
                 "error": error_msg,

@@ -36,10 +36,6 @@ def get_runtime_root() -> Path:
     if is_frozen():
         return Path(getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))).resolve()
 
-    cwd = Path.cwd().resolve()
-    if (cwd / "streamlit_app.py").exists() and (cwd / "tools").exists():
-        return cwd
-
     return Path(__file__).resolve().parent.parent
 
 
