@@ -9,6 +9,8 @@ from app.services.hypothesis_chat import (
     _choose_hypothesis_next_step,
     _choose_refine_option,
     _hypothesis_document_fields,
+    _insert_handoff_bubble,
+    _literature_handoff_bubble,
     choose_option,
     generate_hypothesis,
     reset_session,
@@ -68,8 +70,14 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
     thoughts: Optional[List[str]] = None
 
     if fast_submit_enabled():
-        yield _progress("socratic_tot", [], label="Generating Socratic pass and exploration paths…")
-        soc_pass, thoughts = socratic.socratic_pass_and_tot(clarified, reasoning_policy=policy)
+        yield _progress(
+            "literature_retrieval",
+            [],
+            label="Waiting for LiteratureAgent evidence packet before generating suggestions…",
+        )
+        soc_pass, thoughts = socratic.socratic_pass_and_tot(
+            clarified, reasoning_policy=policy, evidence_query=q
+        )
         if soc_pass and str(soc_pass).strip():
             yield _progress(
                 "socratic_pass",
@@ -130,6 +138,10 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
     if thought_bubbles:
         yield _progress("thoughts", thought_bubbles)
 
+    handoff_bubble = _literature_handoff_bubble()
+    if handoff_bubble:
+        yield _progress("literature_handoff", [handoff_bubble])
+
     memory.insert_interaction("user", q, "initial_question", "hypothesis")
     memory.insert_interaction("assistant", clarified, "clarified_question", "hypothesis")
     memory.insert_interaction("assistant", soc_pass, "socratic_pass", "hypothesis")
@@ -138,6 +150,10 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
     memory.insert_interaction("assistant", thoughts[0], "first_thought_1", "hypothesis")
     memory.insert_interaction("assistant", thoughts[1], "second_thought_1", "hypothesis")
     memory.insert_interaction("assistant", thoughts[2], "third_thought_1", "hypothesis")
+    if handoff_bubble:
+        memory.insert_interaction(
+            "assistant", handoff_bubble["content"], "literature_agent_handoff", "hypothesis"
+        )
 
     memory.set_var("hypothesis_round_count", 0)
     memory.set_var("stage", "refine")
@@ -147,6 +163,7 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
     _bump_usage(memory)
 
     bubbles = build_submit_bubbles(clarified, soc_pass, soc_answers, thoughts)
+    _insert_handoff_bubble(bubbles, handoff_bubble)
     yield _complete(
         {
             "stage": "refine",

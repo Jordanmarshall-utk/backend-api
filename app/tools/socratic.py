@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import re
+from contextvars import ContextVar
 
 # Fix Windows console encoding for Unicode characters (e.g., superscripts like ⁺)
 if sys.platform == "win32":
@@ -24,6 +25,13 @@ _edison_models = None
 _given_vars = None
 _reasoning_layer_build_fn = None
 _reasoning_layer_gen_fn = None
+_last_literature_handoff: ContextVar[dict | None] = ContextVar(
+    "last_literature_handoff", default=None
+)
+
+
+class LiteratureEvidenceUnavailableError(RuntimeError):
+    """Backward-compatible error for callers that explicitly require evidence."""
 
 
 def _lazy_import_reasoning_layer():
@@ -163,16 +171,76 @@ def _lazy_import_given_vars():
     return _given_vars
 
 
-def get_local_literature_context(query: str, limit: int = 5) -> str:
-    """Retrieve evidence-grounded context from the local LiteratureAgent corpus."""
+def get_local_literature_context(
+    query: str,
+    limit: int = 5,
+    *,
+    require_evidence: bool = False,
+) -> str:
+    """Retrieve local evidence and trigger a small literature job if evidence is thin."""
     try:
         from app.tools.polaris_orchestrator import PolarisOrchestrator
-        return PolarisOrchestrator().literature_evidence(query, limit=limit).get(
-            "formatted_context", "Local LiteratureAgent evidence was unavailable."
+        packet = PolarisOrchestrator().literature_evidence(
+            query,
+            limit=limit,
+            max_chars=3000,
+            auto_expand_on_miss=True,
+            min_items=1,
+            retrieval_max_papers=3,
         )
+        provenance = dict(packet.get("provenance") or {})
+        _last_literature_handoff.set({
+            "query": query,
+            "strong_evidence_count": int(provenance.get("strong_evidence_count") or 0),
+            "evidence_items_used_for_gate": int(provenance.get("evidence_items_used_for_gate") or 0),
+            "grounding_status": provenance.get("grounding_status"),
+            "grounding_warning": provenance.get("grounding_warning"),
+            "retrieval_attempt_count": int(provenance.get("retrieval_attempt_count") or 0),
+            "retrieval_attempts": provenance.get("retrieval_attempts") or [],
+            "claim_count": int(provenance.get("claim_count") or 0),
+            "claim_ids": provenance.get("claim_ids") or [],
+            "source_ids": provenance.get("source_ids") or [],
+            "controller_packet_path": provenance.get("controller_packet_path"),
+            "background_retrieval_job": provenance.get("background_retrieval_job"),
+            "background_retrieval_error": provenance.get("background_retrieval_error"),
+        })
+        return packet.get("formatted_context", "Local LiteratureAgent evidence was unavailable.")
     except Exception as exc:
+        _last_literature_handoff.set({"query": query, "error": repr(exc)})
         logging.warning(f"Local LiteratureAgent evidence retrieval unavailable: {exc}")
+        if require_evidence:
+            raise LiteratureEvidenceUnavailableError(str(exc)) from exc
         return "Local LiteratureAgent evidence was unavailable for this analysis."
+
+
+def get_last_literature_handoff() -> dict | None:
+    """Return request-local LiteratureAgent provenance for deterministic UI reporting."""
+    value = _last_literature_handoff.get()
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _audit_and_store_literature_use(response: str, literature_context: str) -> dict:
+    claim_ids = list(dict.fromkeys(re.findall(r"\[(E\d+)\]", literature_context)))
+    source_ids = list(dict.fromkeys(re.findall(r"source=([^\n|]+)", literature_context)))
+    response_lower = str(response or "").lower()
+    used_claim_ids = [claim_id for claim_id in claim_ids if claim_id.lower() in response_lower]
+    used_source_ids = [source_id for source_id in source_ids if source_id.lower() in response_lower]
+    citation_complete = (
+        (not claim_ids or bool(used_claim_ids))
+        and (not source_ids or bool(used_source_ids))
+    )
+    audit = {
+        "available_claim_ids": claim_ids,
+        "available_source_ids": source_ids,
+        "used_claim_ids": used_claim_ids,
+        "used_source_ids": used_source_ids,
+        "evidence_packet_used": citation_complete,
+        "citation_complete": citation_complete,
+    }
+    current = get_last_literature_handoff() or {}
+    current.update(audit)
+    _last_literature_handoff.set(current)
+    return audit
 
 
 def generate_text_with_llm(prompt: str) -> str:
@@ -219,6 +287,12 @@ def clarify_question(question: str, reasoning_policy: str = "auto") -> str:
         {CLARIFY_QUESTION_INSTRUCTIONS}
 
         Question: {question}
+
+        Clarify the user's question without adding literature findings, named examples,
+        calculations, or mechanisms that were not in the question. Put uncertain premises
+        under assumptions; do not turn them into factual claims. Preserve specialized terms
+        from the question verbatim instead of inventing definitions for them. If a definition
+        is needed but was not supplied, label it as an unresolved definition.
         """
         if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
             clarified_question_prompt, _reasoning_meta = _apply_reasoning_policy(
@@ -275,7 +349,11 @@ def socratic_pass(clarified_question_response: str, reasoning_policy: str = "aut
         logging.error(f"SOCRATIC pass failed: {e}")
 
 
-def socratic_pass_and_tot(clarified_question: str, reasoning_policy: str = "auto") -> tuple:
+def socratic_pass_and_tot(
+    clarified_question: str,
+    reasoning_policy: str = "auto",
+    evidence_query: str | None = None,
+) -> tuple:
     """
     Single LLM call: socratic probing + three lines of thought.
     Falls back to separate socratic_pass + tot_generation if parsing fails.
@@ -285,6 +363,11 @@ def socratic_pass_and_tot(clarified_question: str, reasoning_policy: str = "auto
         SOCRATIC_PASS_INSTRUCTIONS = instructions[1]
         TOT_INSTRUCTIONS = instructions[3]
         given_vars = _lazy_import_given_vars()
+        literature_context = get_local_literature_context(
+            evidence_query or clarified_question,
+            limit=2,
+            require_evidence=False,
+        )
 
         combined_prompt = f"""
 Complete BOTH steps in this ONE response.
@@ -298,6 +381,42 @@ STEP 2 — Three distinct lines of thought (use Step 1 as reasoning; do NOT outp
 {TOT_INSTRUCTIONS}
 User Question: {clarified_question}
 Socratic Answers: Use your Step 1 probing questions and concise self-answers inline.
+
+Literature evidence contract:
+{literature_context}
+
+Keep the original hypothesis-agent behavior: produce useful Socratic questions
+and three exploratory lines of thought. When the packet contains numbered evidence
+claims, every thought that draws on literature MUST include an `Evidence anchor:`
+line naming at least one claim ID plus its DOI or paper_slug. Explain what the source
+supports and what remains inference. If the packet is weak or empty, say that briefly
+and continue with clearly labeled hypotheses.
+
+If a claim is labeled `partial_context_only`, preserve its experimental scope exactly.
+For example, concentration evidence is not chain-length evidence, and morphology evidence
+is not direct defect-density evidence. A named comparison material, spacer, composition,
+or derivative that is absent from both the user's question and the packet may still be
+proposed as a novel idea, but it MUST be labeled `Novel proposal - not supported by the
+retrieved packet` and must not be presented as a reported result. Explain why testing it
+would answer the question. Use a generic description when a specific identity is not
+scientifically necessary.
+
+For every partial-context evidence anchor, include an `Evidence boundary:` sentence that
+states the variable the source actually tested and the requested variable it did not test.
+Never write that concentration/addition evidence "suggests" or demonstrates a chain-length
+relationship; that relationship may only appear as a labeled inference or novel proposal.
+
+Never claim that a named material, mechanism, calculation, experiment, or prior
+study supports a thought unless that support appears explicitly in the packet and
+you cite its DOI or paper_slug. Do not invent phrases such as "supported by DFT",
+"studies show", or "prior literature indicates". When direct support is absent,
+write exploratory possibilities as proposals that require testing.
+
+If the packet says there is no strong direct local support or that evidence is thin,
+do not introduce any named chemical, material, spacer, composition, abbreviation,
+acronym, or numerical result that is absent from both the user's question and the
+packet. Explore general variables, competing mechanisms, controls, and measurements
+instead. This restriction is mandatory even for speculative lines of thought.
 
 Required format:
 ## Socratic Pass
@@ -325,6 +444,43 @@ Required format:
         if not llm_response or not str(llm_response).strip():
             raise ValueError("empty combined socratic/tot response")
 
+        use_audit = _audit_and_store_literature_use(str(llm_response), literature_context)
+        partial_context = "partial_context_only" in literature_context
+        if (
+            (use_audit["available_claim_ids"] and not use_audit["evidence_packet_used"])
+            or partial_context
+        ):
+            repair_prompt = f"""
+Revise the response below without changing its required section structure or core ideas.
+For each line of thought that uses literature, retain or add an `Evidence anchor:` sentence
+with the relevant claim ID and source identifier. Separate directly supported statements
+from proposed inference. Do not add facts or citations absent from the packet.
+
+This packet provides partial context only. For every named material, spacer, derivative,
+composition, acronym, or numerical result, determine whether it appears in the user's
+question or LiteratureAgent packet. If it does not, either replace it with a scientifically
+sufficient generic description or retain it only as an explicitly labeled `Novel proposal -
+not supported by the retrieved packet`. Do not attach an evidence anchor to imply support
+for that novel identity. Do not treat concentration evidence as chain-length evidence,
+morphology as direct defect-density evidence, or one intervention variable as proof of
+another. Preserve useful experimental proposals and uncertainty statements.
+Every partial-context evidence anchor MUST be followed by an `Evidence boundary:` sentence
+that names what the cited source actually tested and what it did not test. In particular,
+if the source varies PEAI concentration/addition rather than molecular chain length, state
+explicitly that it cannot establish a chain-length relationship. Rewrite any phrase saying
+that such evidence "suggests a chain-length correlation" as a separate proposed inference.
+
+LiteratureAgent packet:
+{literature_context}
+
+Response to revise:
+{llm_response}
+"""
+            revised = generate_text_with_llm(repair_prompt)
+            if revised and str(revised).strip():
+                llm_response = revised
+            _audit_and_store_literature_use(str(llm_response), literature_context)
+
         text = str(llm_response)
         distinct_match = re.search(r"Distinct\s+Line\s+of\s+Thought", text, re.IGNORECASE)
         if distinct_match:
@@ -343,16 +499,51 @@ Required format:
             ).strip()
         thoughts = _parse_tot_thoughts_from_text(text)
 
+        weak_local_evidence = (
+            "No strong direct local support" in literature_context
+            or "Local evidence was thin" in literature_context
+        )
+        if weak_local_evidence:
+            thoughts = [_mark_unverified_exploration(thought) for thought in thoughts]
+
         substantial = [t for t in thoughts if t and len(str(t).strip()) > 20]
         if not soc_pass or len(substantial) < 3:
             logging.info("Combined socratic/tot parse weak; falling back to sequential calls")
             soc_pass = socratic_pass(clarified_question, reasoning_policy=reasoning_policy) or ""
             thoughts = tot_generation(soc_pass, clarified_question, None, reasoning_policy=reasoning_policy)
         return soc_pass, thoughts
+    except LiteratureEvidenceUnavailableError:
+        raise
     except Exception as e:
         logging.warning(f"socratic_pass_and_tot failed, using sequential flow: {e}")
         soc_pass = socratic_pass(clarified_question, reasoning_policy=reasoning_policy) or ""
         return soc_pass, tot_generation(soc_pass, clarified_question, None, reasoning_policy=reasoning_policy)
+
+
+def _mark_unverified_exploration(thought: object) -> str:
+    """Prevent weakly grounded exploration from sounding literature-confirmed."""
+    text = str(thought or "").strip()
+    if not text:
+        return text
+    attribution_markers = (
+        "supported by", "as evidenced", "studies show", "studies demonstrate",
+        "literature shows", "literature indicates", "prior literature", "reported studies",
+        "calculations showing", "calculations demonstrate",
+    )
+    kept_sentences = []
+    removed_attribution = False
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        lowered = sentence.lower()
+        has_source_id = bool(re.search(r"\b10\.\d{4,9}/\S+|paper_slug", sentence, re.IGNORECASE))
+        if any(marker in lowered for marker in attribution_markers) and not has_source_id:
+            removed_attribution = True
+            continue
+        kept_sentences.append(sentence)
+    cleaned = " ".join(kept_sentences).strip() or "This possibility requires direct literature or experimental testing."
+    prefix = "Exploratory hypothesis (not directly supported by the current local packet): "
+    if removed_attribution:
+        cleaned += " Any implied prior support was omitted because no DOI or paper_slug was supplied."
+    return prefix + cleaned
 
 
 def _parse_tot_thoughts_from_text(text: str) -> list:
@@ -876,6 +1067,11 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
         **CRITICAL: Use this context to understand what has been discussed, but your 3 continuation options MUST build directly on the selected option below, not on earlier parts of the conversation.**
         """
 
+        literature_context = get_local_literature_context(
+            f"{initial_clarified_question}\nSelected continuation: {line_of_thought}",
+            limit=4,
+        )
+
         tot_generation_prompt = f"""
         {RETRY_THINKING_INSTRUCTIONS}
 
@@ -891,6 +1087,9 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
         **Initial Question (for context only):** {initial_clarified_question}
         {context_section}
 
+        **LiteratureAgent evidence packet for this continuation:**
+        {literature_context}
+
         **FINAL REMINDER:**
         - The user selected the option above (the "SELECTED OPTION")
         - Generate 3 options that CONTINUE exploring that selected option
@@ -898,6 +1097,10 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
         - Do NOT generate new TOT thoughts or start new directions
         - Do NOT ignore the selected option and generate unrelated thoughts
         - Build directly on the materials, mechanisms, or conditions mentioned in the selected option
+        - Ground at least one continuation in the packet when it contains a relevant numbered claim
+        - Any literature-grounded statement must include an `Evidence anchor:` with the claim ID and DOI or paper_slug
+        - Keep partial evidence within its tested scope; label unsupported extensions as `Novel proposal - not supported by the retrieved packet`
+        - If the packet is unavailable, continue generating useful options but label them as unverified proposals
         """
 
         if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
@@ -917,6 +1120,27 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
 
         if llm_response is None:
             llm_response = ""
+
+        use_audit = _audit_and_store_literature_use(llm_response, literature_context)
+        if use_audit["available_claim_ids"] and not use_audit["citation_complete"]:
+            repair_prompt = f"""
+Revise the three continuation options below while preserving their direction and format.
+Ground at least one option in the supplied LiteratureAgent packet. Every literature-backed
+statement must include an `Evidence anchor:` naming a claim ID and its DOI or paper_slug.
+Keep partial-context evidence within the variable actually tested. Clearly label all
+unsupported extensions as `Novel proposal - not supported by the retrieved packet`.
+Do not invent citations, results, materials, or numerical values.
+
+LiteratureAgent packet:
+{literature_context}
+
+Continuation options to revise:
+{llm_response}
+"""
+            repaired = generate_text_with_llm(repair_prompt)
+            if repaired and repaired.strip():
+                llm_response = repaired
+                _audit_and_store_literature_use(llm_response, literature_context)
 
         # Log the raw response for debugging
         logging.info(f"retry_thinking_deepen_thoughts raw response (first 1000 chars): {llm_response[:1000]}")
@@ -1298,6 +1522,27 @@ def hypothesis_synthesis(socratic_question: str, next_step_option: str, previous
 
         if llm_response is None or not llm_response.strip():
             return "Error generating hypothesis. Please check your API key and try again."
+
+        use_audit = _audit_and_store_literature_use(llm_response, literature_context)
+        if use_audit["available_claim_ids"] and not use_audit["citation_complete"]:
+            repair_prompt = f"""
+Revise the hypothesis below without changing its core scientific proposal. Any statement
+presented as literature-supported must include an `Evidence anchor:` with a claim ID and
+its DOI or paper_slug from the supplied packet. Preserve the tested scope of partial
+evidence and add an `Evidence boundary:` where the source does not test the proposed
+variable directly. Keep novel ideas, but label them `Novel proposal - not supported by
+the retrieved packet`. Do not invent citations, facts, mechanisms, or numerical values.
+
+LiteratureAgent packet:
+{literature_context}
+
+Hypothesis to revise:
+{llm_response}
+"""
+            repaired = generate_text_with_llm(repair_prompt)
+            if repaired and repaired.strip():
+                llm_response = repaired
+                _audit_and_store_literature_use(llm_response, literature_context)
 
         return llm_response
 

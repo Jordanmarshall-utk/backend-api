@@ -66,6 +66,96 @@ def _normalize_options(options: Any) -> List[str]:
     return options[:3]
 
 
+def _literature_handoff_bubble() -> Optional[Dict[str, str]]:
+    handoff = socratic.get_last_literature_handoff()
+    if not handoff:
+        return None
+    retrieval = handoff.get("background_retrieval_job")
+    grounding_status = str(handoff.get("grounding_status") or "")
+    if grounding_status == "unavailable_after_retries":
+        attempts = int(handoff.get("retrieval_attempt_count") or 0)
+        return {
+            "role": "assistant",
+            "title": "LiteratureAgent grounding unavailable",
+            "content": (
+                f"LiteratureAgent completed {attempts} targeted retrieval attempt(s), but no strongly relevant "
+                "evidence packet was found. The exploration options were still generated using the original "
+                "Hypothesis Agent workflow. Treat them as unverified proposals, not literature-supported claims."
+            ),
+        }
+    if grounding_status == "partially_grounded":
+        used_sources = list(handoff.get("used_source_ids") or [])
+        return {
+            "role": "assistant",
+            "title": "LiteratureAgent partial grounding",
+            "content": (
+                "LiteratureAgent found evidence relevant to part of the question, but not direct proof of the full "
+                "proposed mechanism. The exploration options distinguish that evidence from inference."
+                + (
+                    "\n\nEvidence cited in the response: "
+                    + ", ".join(f"`{item}`" for item in used_sources)
+                    + "."
+                    if used_sources else
+                    "\n\nNo packet source identifier was detected in the generated response."
+                )
+            ),
+        }
+    if isinstance(retrieval, dict) and retrieval.get("job_id"):
+        status = retrieval.get("status") or "queued"
+        if status == "completed":
+            used_sources = list(handoff.get("used_source_ids") or [])
+            usage_note = (
+                "\n\n**Evidence used:** " + ", ".join(f"`{item}`" for item in used_sources)
+                if used_sources else
+                "\n\nThe packet was available, but no source identifier was detected in the generated response."
+            )
+            content = (
+                "The original local packet did not contain enough direct support. The Hypothesis Agent "
+                "paused while LiteratureAgent completed a targeted search and rebuilt the evidence packet. "
+                "The exploration options below were generated only after that packet was available.\n\n"
+                f"**Job:** `{retrieval['job_id']}`  \n"
+                "**Status:** `completed`"
+                + usage_note
+            )
+        else:
+            content = (
+                "The Hypothesis Agent is waiting for LiteratureAgent to finish a targeted search before "
+                "generating exploration options.\n\n"
+                f"**Job:** `{retrieval['job_id']}`  \n"
+                f"**Status:** `{status}`"
+            )
+        return {"role": "assistant", "title": "LiteratureAgent handoff", "content": content}
+    strong_count = int(handoff.get("strong_evidence_count") or 0)
+    if strong_count > 0:
+        used_sources = list(handoff.get("used_source_ids") or [])
+        return {
+            "role": "assistant",
+            "title": "LiteratureAgent grounding",
+            "content": (
+                f"Found {strong_count} directly relevant local evidence item(s); no new search was required. "
+                + (
+                    "Evidence cited in the response: " + ", ".join(f"`{item}`" for item in used_sources) + "."
+                    if used_sources else
+                    "No source identifier was detected in the generated response."
+                )
+            ),
+        }
+    if handoff.get("background_retrieval_error") or handoff.get("error"):
+        return {
+            "role": "assistant",
+            "title": "LiteratureAgent handoff",
+            "content": "Direct local evidence was insufficient, but the targeted literature search could not be started. Check the Literature Agent page for details.",
+        }
+    return None
+
+
+def _insert_handoff_bubble(bubbles: List[Dict[str, str]], bubble: Optional[Dict[str, str]]) -> None:
+    if not bubble:
+        return
+    insert_at = 1 if bubbles else 0
+    bubbles.insert(insert_at, bubble)
+
+
 def _full_context(agent: HypothesisAgent) -> str:
     context = agent.build_conversation_context()
     negative_ctx = agent._build_negative_hypotheses_context()
@@ -90,7 +180,11 @@ def submit_question(memory: Any, question: str, reasoning_policy: str = "auto") 
 
     soc_answers: Optional[str] = None
     if fast_submit_enabled():
-        soc_pass, thoughts = socratic.socratic_pass_and_tot(clarified, reasoning_policy=policy)
+        soc_pass, thoughts = socratic.socratic_pass_and_tot(
+            clarified,
+            reasoning_policy=policy,
+            evidence_query=q,
+        )
     elif skip_socratic_answers():
         soc_pass = socratic.socratic_pass(clarified, reasoning_policy=policy)
         if not soc_pass or not str(soc_pass).strip():
@@ -126,7 +220,13 @@ def submit_question(memory: Any, question: str, reasoning_policy: str = "auto") 
     memory.set_var("stage", "refine")
     _bump_usage(memory)
 
+    handoff_bubble = _literature_handoff_bubble()
+    if handoff_bubble:
+        memory.insert_interaction(
+            "assistant", handoff_bubble["content"], "literature_agent_handoff", "hypothesis"
+        )
     bubbles = build_submit_bubbles(clarified, soc_pass, soc_answers, thoughts)
+    _insert_handoff_bubble(bubbles, handoff_bubble)
     return {
         "stage": "refine",
         "messages": bubbles,
@@ -184,6 +284,12 @@ def _choose_refine_option(memory: Any, choice: str) -> Dict[str, Any]:
         else "How can we continue exploring this hypothesis?"
     )
     bubbles = build_choose_bubbles(str(picked), soc_q_display, options[:3])
+    handoff_bubble = _literature_handoff_bubble()
+    _insert_handoff_bubble(bubbles, handoff_bubble)
+    if handoff_bubble:
+        memory.insert_interaction(
+            "assistant", handoff_bubble["content"], "literature_agent_continuation_handoff", "hypothesis"
+        )
     return {
         "stage": "hypothesis",
         "messages": bubbles,
@@ -264,6 +370,12 @@ def _choose_hypothesis_next_step(memory: Any, choice: str) -> Dict[str, Any]:
     memory.set_var("stage", "hypothesis")
 
     bubbles = build_continue_bubbles(str(picked), new_opts[:3])
+    handoff_bubble = _literature_handoff_bubble()
+    _insert_handoff_bubble(bubbles, handoff_bubble)
+    if handoff_bubble:
+        memory.insert_interaction(
+            "assistant", handoff_bubble["content"], "literature_agent_continuation_handoff", "hypothesis"
+        )
     return {
         "stage": "hypothesis",
         "messages": bubbles,
@@ -386,6 +498,8 @@ def generate_hypothesis(memory: Any) -> Dict[str, Any]:
         str(hypothesis),
         str(analysis_rubric) if analysis_rubric else None,
     )
+    handoff_bubble = _literature_handoff_bubble()
+    _insert_handoff_bubble(bubbles, handoff_bubble)
     return {
         "stage": "analysis",
         "messages": bubbles,

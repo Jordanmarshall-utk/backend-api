@@ -20,7 +20,8 @@ def _validate_job_id(job_id: str) -> None:
     if not _JOB_ID_RE.match(job_id):
         raise HTTPException(status_code=400, detail="Invalid job_id format")
 
-VALID_STAGES = {"extract_batch", "vision_pass", "sanitize_summaries", "integrate_and_model", "knowledge_graph"}
+VALID_STAGES = {"extract_batch", "vision_pass", "sanitize_summaries", "integrate_and_model", "knowledge_graph", "evidence_packet"}
+VALID_EXTRACTION_PROFILES = {"none", "hypothesis_support", "general_literature", "pce_stability_modeling"}
 
 
 def get_service() -> LiteratureAgentService:
@@ -58,6 +59,14 @@ class StartStageRequest(BaseModel):
     stage: str
     search_query: str = "perovskite solar cell stability T80 retention"
     max_papers: int = 100
+    extraction_profile: str = "pce_stability_modeling"
+    family_gating: str = "strict"
+
+
+class EvidencePacketRequest(BaseModel):
+    query: str
+    limit: int = 5
+    max_chars: int = 16000
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -86,6 +95,21 @@ def search_literature(
     svc = get_service()
     hits = svc.search(body.query, limit=body.limit)
     return [PaperHit(**h) for h in hits]
+
+
+@router.post("/literature/evidence_packet")
+def get_literature_evidence_packet(
+    body: EvidencePacketRequest,
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> dict:
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="query is required")
+    svc = get_service()
+    return svc.write_evidence_packet(
+        body.query.strip(),
+        limit=max(1, min(body.limit, 20)),
+        max_chars=max(1000, min(body.max_chars, 50000)),
+    )
 
 
 @router.get("/literature/jobs", response_model=list[JobSummary])
@@ -133,12 +157,19 @@ def start_literature_stage(
             status_code=400,
             detail=f"Invalid stage '{body.stage}'. Must be one of: {sorted(VALID_STAGES)}",
         )
+    if body.extraction_profile not in VALID_EXTRACTION_PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid extraction_profile '{body.extraction_profile}'. Must be one of: {sorted(VALID_EXTRACTION_PROFILES)}",
+        )
     svc = get_service()
     job = svc.start_stage(
         body.stage,
         request={
             "search_query": body.search_query,
             "max_papers": body.max_papers,
+            "extraction_profile": body.extraction_profile,
+            "family_gating": body.family_gating,
             "disable_google_drive": True,
         },
     )
