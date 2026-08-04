@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"] = "ok"
-    version: str = "1.0.0"
+    version: str = "1.3.0"
 
 
 class SessionContextModel(BaseModel):

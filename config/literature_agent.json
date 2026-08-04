@@ -1,11 +1,11 @@
 {
-  "controller": "E:\\LiteratureAgentProject\\literature_agent_full_end_to_end_v21_3_english_sanitizer.py",
-  "base_csv": "C:\\Users\\jorda\\Downloads\\Perovskite_database_content_all_data.csv",
-  "ontology_path": "E:\\LiteratureAgentProject\\config\\perovskite_ontology_library_v19.json",
-  "work_dir": "E:\\LiteratureAgent\\lit_outputs",
-  "integration_out_dir": "E:\\LiteratureAgent\\artifacts_literature_dataset_update",
-  "model_script": "E:\\LiteratureAgent\\pce_then_stability_same_approach.py",
-  "model_out_dir": "E:\\LiteratureAgent\\artifacts_pce_then_stability_lit_updated",
-  "knowledge_graph_out_dir": "E:\\LiteratureAgent\\artifacts_literature_knowledge_graph",
-  "job_dir": "E:\\LiteratureAgent\\polaris_jobs"
+  "controller": "../literature_agent/controller/literature_agent_full_end_to_end_v21_3_english_sanitizer.py",
+  "base_csv": "../data/Perovskite_database_content_all_data.csv",
+  "ontology_path": "../literature_agent/config/perovskite_ontology_library_v19.json",
+  "work_dir": "../../runtime/literature_agent/outputs",
+  "integration_out_dir": "../../runtime/literature_agent/integration",
+  "model_script": "../literature_agent/models/pce_then_stability_same_approach.py",
+  "model_out_dir": "../../runtime/literature_agent/models",
+  "knowledge_graph_out_dir": "../../runtime/literature_agent/knowledge_graph",
+  "job_dir": "../../runtime/literature_agent/jobs"
 }
