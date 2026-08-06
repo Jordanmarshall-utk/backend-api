@@ -99,7 +99,7 @@ def _ensure_api_key():
             "LLM features may not work. Set the API key as an environment variable before starting the watcher server."
         )
     else:
-        logger.info(f"API key found in environment (starts with: {api_key[:10]}...)")
+        logger.info("API key found in environment.")
     return api_key
 
 # Check API key on module load

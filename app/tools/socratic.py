@@ -120,9 +120,9 @@ QWEN_API_KEY = (
 FUTUREHOUSE_API_KEY = os.getenv("FUTUREHOUSE_API_KEY")
 QWEN_MODEL_ID = "Qwen/Qwen2.5-72B-Instruct"
 
-# Log API key status on import (first 10 chars only) - but only if API key exists
+# Log only whether an API key is configured; never log key material.
 if QWEN_API_KEY:
-    logging.info(f"Qwen API key loaded from environment on module import (starts with: {QWEN_API_KEY[:10]}...)")
+    logging.info("Qwen API key loaded from environment on module import.")
 else:
     logging.warning("No API key found in environment on module import. Will check again at runtime.")
 
