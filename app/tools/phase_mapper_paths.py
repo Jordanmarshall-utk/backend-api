@@ -12,12 +12,25 @@ from pathlib import Path
 from app.tools.paths import get_user_data_dir
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_-]+")
+_USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _UPLOAD_KINDS = {"plate_reader", "raw_xrd", "xrd_labels_reviewed"}
 
 
 def slugify(text: str) -> str:
     slug = _SLUG_RE.sub("_", text.strip()).strip("_")
     return slug or "library"
+
+
+def _validate_user_id(user_id: str) -> str:
+    """Validate user_id against a strict safe charset.
+
+    user_id is an opaque auth-provided identifier (see AuthUser.id in
+    app/core/auth.py). It is rejected rather than sanitized/coerced so that
+    two distinct real user ids can never be mangled into colliding paths.
+    """
+    if not isinstance(user_id, str) or not _USER_ID_RE.match(user_id):
+        raise ValueError(f"Invalid user_id: {user_id!r}")
+    return user_id
 
 
 def _phase_mapper_root() -> Path:
@@ -27,6 +40,8 @@ def _phase_mapper_root() -> Path:
 
 
 def library_root(user_id: str, slug: str) -> Path:
+    user_id = _validate_user_id(user_id)
+    slug = slugify(slug)
     root = _phase_mapper_root() / user_id / slug
     root.mkdir(parents=True, exist_ok=True)
     return root
