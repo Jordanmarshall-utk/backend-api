@@ -241,6 +241,28 @@ class DatabaseManager:
                 source TEXT,
                 created_at TEXT NOT NULL
             )""",
+            f"""CREATE TABLE IF NOT EXISTS phase_mapper_libraries (
+                id {serial} PRIMARY KEY {autoincrement},
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                composition_profile TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+            f"""CREATE TABLE IF NOT EXISTS phase_mapper_runs (
+                id {serial} PRIMARY KEY {autoincrement},
+                library_id BIGINT NOT NULL,
+                status TEXT NOT NULL,
+                dir_path TEXT NOT NULL,
+                job_pid BIGINT,
+                return_code BIGINT,
+                error_message TEXT,
+                frozen INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (library_id) REFERENCES phase_mapper_libraries(id)
+            )""",
         ]
 
         async with self._engine.begin() as conn:
@@ -803,3 +825,165 @@ class DatabaseManager:
                 sql += f" LIMIT {int(limit)}"
             rows = (await conn.execute(text(sql))).fetchall()
             return [{"hypothesis_text": r[0], "material_hint": r[1] or "", "status": r[2], "evidence_summary": r[3] or "", "source": r[4] or "", "created_at": r[5] or ""} for r in rows]
+
+    # ── phase mapper libraries ───────────────────────────────────────────────
+
+    def create_phase_mapper_library(self, user_id: str, name: str, slug: str, composition_profile: str = "") -> int:
+        return _run(self._create_phase_mapper_library_async(user_id, name, slug, composition_profile))
+
+    async def _create_phase_mapper_library_async(self, user_id: str, name: str, slug: str, composition_profile: str) -> int:
+        pg = _is_postgres(self._engine)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        async with self._engine.begin() as conn:
+            if pg:
+                result = await conn.execute(text(
+                    "INSERT INTO phase_mapper_libraries (user_id, name, slug, composition_profile, created_at, updated_at) "
+                    "VALUES (:uid, :n, :s, :cp, :ca, :ua) RETURNING id"
+                ), {"uid": user_id, "n": name, "s": slug, "cp": composition_profile, "ca": now, "ua": now})
+                return result.fetchone()[0]
+            await conn.execute(text(
+                "INSERT INTO phase_mapper_libraries (user_id, name, slug, composition_profile, created_at, updated_at) "
+                "VALUES (:uid, :n, :s, :cp, :ca, :ua)"
+            ), {"uid": user_id, "n": name, "s": slug, "cp": composition_profile, "ca": now, "ua": now})
+            return (await conn.execute(text("SELECT last_insert_rowid()"))).fetchone()[0]
+
+    def list_phase_mapper_libraries(self, user_id: str) -> List[Dict]:
+        return _run(self._list_phase_mapper_libraries_async(user_id))
+
+    async def _list_phase_mapper_libraries_async(self, user_id: str) -> List[Dict]:
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(text(
+                "SELECT id, user_id, name, slug, composition_profile, created_at, updated_at "
+                "FROM phase_mapper_libraries WHERE user_id = :uid ORDER BY created_at DESC"
+            ), {"uid": user_id})).fetchall()
+            return [self._library_row_to_dict(r) for r in rows]
+
+    def get_phase_mapper_library(self, library_id: int) -> Optional[Dict]:
+        return _run(self._get_phase_mapper_library_async(library_id))
+
+    async def _get_phase_mapper_library_async(self, library_id: int) -> Optional[Dict]:
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(text(
+                "SELECT id, user_id, name, slug, composition_profile, created_at, updated_at "
+                "FROM phase_mapper_libraries WHERE id = :id"
+            ), {"id": library_id})).fetchone()
+            return self._library_row_to_dict(row) if row else None
+
+    @staticmethod
+    def _library_row_to_dict(row) -> Dict:
+        return {
+            "id": row[0], "user_id": row[1], "name": row[2], "slug": row[3],
+            "composition_profile": row[4] or "", "created_at": row[5], "updated_at": row[6],
+        }
+
+    def delete_phase_mapper_library(self, library_id: int) -> None:
+        _run(self._delete_phase_mapper_library_async(library_id))
+
+    async def _delete_phase_mapper_library_async(self, library_id: int) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(text("DELETE FROM phase_mapper_runs WHERE library_id = :id"), {"id": library_id})
+            await conn.execute(text("DELETE FROM phase_mapper_libraries WHERE id = :id"), {"id": library_id})
+
+    # ── phase mapper runs ─────────────────────────────────────────────────────
+
+    def create_phase_mapper_run(self, library_id: int, dir_path: str) -> int:
+        return _run(self._create_phase_mapper_run_async(library_id, dir_path))
+
+    async def _create_phase_mapper_run_async(self, library_id: int, dir_path: str) -> int:
+        pg = _is_postgres(self._engine)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        async with self._engine.begin() as conn:
+            if pg:
+                result = await conn.execute(text(
+                    "INSERT INTO phase_mapper_runs (library_id, status, dir_path, created_at) "
+                    "VALUES (:lid, 'running', :dp, :ca) RETURNING id"
+                ), {"lid": library_id, "dp": dir_path, "ca": now})
+                return result.fetchone()[0]
+            await conn.execute(text(
+                "INSERT INTO phase_mapper_runs (library_id, status, dir_path, created_at) "
+                "VALUES (:lid, 'running', :dp, :ca)"
+            ), {"lid": library_id, "dp": dir_path, "ca": now})
+            return (await conn.execute(text("SELECT last_insert_rowid()"))).fetchone()[0]
+
+    def update_phase_mapper_run(
+        self, run_id: int, *, status: Optional[str] = None, job_pid: Optional[int] = None,
+        return_code: Optional[int] = None, error_message: Optional[str] = None,
+        frozen: Optional[bool] = None, completed_at: Optional[str] = None,
+    ) -> None:
+        _run(self._update_phase_mapper_run_async(run_id, status, job_pid, return_code, error_message, frozen, completed_at))
+
+    async def _update_phase_mapper_run_async(
+        self, run_id: int, status, job_pid, return_code, error_message, frozen, completed_at,
+    ) -> None:
+        fields = {
+            "status": status, "job_pid": job_pid, "return_code": return_code,
+            "error_message": error_message, "completed_at": completed_at,
+        }
+        if frozen is not None:
+            fields["frozen"] = int(frozen)
+        fields = {k: v for k, v in fields.items() if v is not None}
+        if not fields:
+            return
+        set_clause = ", ".join(f"{k} = :{k}" for k in fields)
+        params = dict(fields)
+        params["id"] = run_id
+        async with self._engine.begin() as conn:
+            await conn.execute(text(f"UPDATE phase_mapper_runs SET {set_clause} WHERE id = :id"), params)
+
+    def get_phase_mapper_run(self, run_id: int) -> Optional[Dict]:
+        return _run(self._get_phase_mapper_run_async(run_id))
+
+    async def _get_phase_mapper_run_async(self, run_id: int) -> Optional[Dict]:
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(text(
+                "SELECT id, library_id, status, dir_path, job_pid, return_code, error_message, frozen, created_at, completed_at "
+                "FROM phase_mapper_runs WHERE id = :id"
+            ), {"id": run_id})).fetchone()
+            return self._run_row_to_dict(row) if row else None
+
+    def list_phase_mapper_runs(self, library_id: int) -> List[Dict]:
+        return _run(self._list_phase_mapper_runs_async(library_id))
+
+    async def _list_phase_mapper_runs_async(self, library_id: int) -> List[Dict]:
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(text(
+                "SELECT id, library_id, status, dir_path, job_pid, return_code, error_message, frozen, created_at, completed_at "
+                "FROM phase_mapper_runs WHERE library_id = :lid ORDER BY id DESC"
+            ), {"lid": library_id})).fetchall()
+            return [self._run_row_to_dict(r) for r in rows]
+
+    def get_latest_phase_mapper_run(self, library_id: int) -> Optional[Dict]:
+        return _run(self._get_latest_phase_mapper_run_async(library_id))
+
+    async def _get_latest_phase_mapper_run_async(self, library_id: int) -> Optional[Dict]:
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(text(
+                "SELECT id, library_id, status, dir_path, job_pid, return_code, error_message, frozen, created_at, completed_at "
+                "FROM phase_mapper_runs WHERE library_id = :lid AND status = 'succeeded' ORDER BY id DESC LIMIT 1"
+            ), {"lid": library_id})).fetchone()
+            return self._run_row_to_dict(row) if row else None
+
+    def has_active_phase_mapper_run(self, library_id: int) -> bool:
+        return _run(self._has_active_phase_mapper_run_async(library_id))
+
+    async def _has_active_phase_mapper_run_async(self, library_id: int) -> bool:
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(text(
+                "SELECT 1 FROM phase_mapper_runs WHERE library_id = :lid AND status = 'running' LIMIT 1"
+            ), {"lid": library_id})).fetchone()
+            return row is not None
+
+    def delete_phase_mapper_run(self, run_id: int) -> None:
+        _run(self._delete_phase_mapper_run_async(run_id))
+
+    async def _delete_phase_mapper_run_async(self, run_id: int) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(text("DELETE FROM phase_mapper_runs WHERE id = :id"), {"id": run_id})
+
+    @staticmethod
+    def _run_row_to_dict(row) -> Dict:
+        return {
+            "id": row[0], "library_id": row[1], "status": row[2], "dir_path": row[3],
+            "job_pid": row[4], "return_code": row[5], "error_message": row[6] or "",
+            "frozen": bool(row[7]), "created_at": row[8], "completed_at": row[9],
+        }
