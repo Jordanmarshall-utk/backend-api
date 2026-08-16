@@ -1,5 +1,8 @@
 """Unit tests for PhaseMapperService, exercised against a real DatabaseManager."""
+import io
+import json
 import os
+import zipfile
 
 import pytest
 
@@ -385,6 +388,121 @@ def test_get_heatmaps_renames_colliding_columns_instead_of_dropping_data(service
     assert a2["priority_optical_remeasurement"] == 0.8
 
 
+def test_get_heatmaps_uses_predictions_normalized_value_not_raw_optical_value(service, db, tmp_path):
+    # Regression test for the final-review finding: model_predictions_all_wells.csv
+    # is written by the real pipeline as a *superset* of
+    # composition_descriptors_per_well.csv and optical_features_per_well.csv,
+    # but it also overwrites optical_heterogeneity_score_total,
+    # pl_abs_disagreement_score, and optical_phase_complexity_score with
+    # compute_xrd_priority-normalized (0-1 minmax) values -- different from
+    # the raw values under the same column names in
+    # optical_features_per_well.csv. GET /predictions reads
+    # model_predictions_all_wells.csv directly, so /heatmaps must agree with
+    # it on these keys rather than serving the stale raw optical values.
+    #
+    # This fixture is intentionally wider than a toy 2-4 column CSV: it
+    # mirrors the real pipeline's column shape (composition descriptors, row/
+    # col, optical features, prediction/priority columns) so the merge logic
+    # is exercised the way it actually behaves against real pipeline output.
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "composition_descriptors_per_well.csv").write_text(
+        "well,row,col,library,Cs_fraction,Rb_fraction,FA_fraction,A_site_entropy\n"
+        "A1,A,1,Lib A,0.0,0.0,1.0,0.41\n"
+        "A2,A,2,Lib A,0.0,1.0,0.0,0.55\n",
+        encoding="utf-8",
+    )
+    (run_dir / "optical_features_per_well.csv").write_text(
+        "well,library,pl_peak_nm,optical_heterogeneity_score_total,pl_abs_disagreement_score,"
+        "optical_phase_complexity_score,measurement_QC_flag_count\n"
+        "A1,Lib A,512.3,14.7,9.2,3.6,2\n"
+        "A2,Lib A,498.1,22.1,4.4,1.1,0\n",
+        encoding="utf-8",
+    )
+    (run_dir / "model_predictions_all_wells.csv").write_text(
+        "well,row,col,library,Cs_fraction,Rb_fraction,FA_fraction,A_site_entropy,pl_peak_nm,"
+        "optical_heterogeneity_score_total,pl_abs_disagreement_score,optical_phase_complexity_score,"
+        "measurement_QC_flag_count,xrd_priority_score,model_uncertainty_score\n"
+        "A1,A,1,Lib A,0.0,0.0,1.0,0.41,512.3,0.0,1.0,1.0,2,0.72,0.5\n"
+        "A2,A,2,Lib A,0.0,1.0,0.0,0.55,498.1,1.0,0.0,0.0,0,0.31,0.2\n",
+        encoding="utf-8",
+    )
+    (run_dir / "xrd_recommendations_next_wells.csv").write_text(
+        "well,row,col,Cs_fraction,xrd_priority_score,reason_for_recommendation\n"
+        "A1,A,1,0.0,0.72,high model uncertainty\n",
+        encoding="utf-8",
+    )
+    (run_dir / "optical_remeasurement_recommendations.csv").write_text(
+        "well,row,col,optical_remeasurement_priority_score,missing_spectra_score,"
+        "measurement_QC_flag_count,reason_for_remeasurement\n"
+        "A1,A,1,0.8,0.5,2,missing spectral features\n"
+        "A2,A,2,0.1,0.0,0,no major optical QC issue\n",
+        encoding="utf-8",
+    )
+
+    result = service.get_heatmaps(run_id, "user-A")
+
+    a1 = next(w for w in result["wells"] if w["well"] == "A1")
+    a2 = next(w for w in result["wells"] if w["well"] == "A2")
+
+    # The clean, unprefixed key must carry the NORMALIZED (predictions) value,
+    # not the raw optical value, for all three colliding metrics.
+    assert a1["optical_heterogeneity_score_total"] == 0.0
+    assert a2["optical_heterogeneity_score_total"] == 1.0
+    assert a1["pl_abs_disagreement_score"] == 1.0
+    assert a2["pl_abs_disagreement_score"] == 0.0
+    assert a1["optical_phase_complexity_score"] == 1.0
+    assert a2["optical_phase_complexity_score"] == 0.0
+
+    # composition_descriptors_per_well.csv / optical_features_per_well.csv
+    # must not be merged at all when model_predictions_all_wells.csv (a
+    # confirmed superset) is present -- so no renamed duplicate of these
+    # metrics should exist under any tag.
+    for col in result["columns"]:
+        assert not col.startswith("optical_heterogeneity_score_total_")
+        assert not col.startswith("pl_abs_disagreement_score_")
+        assert not col.startswith("optical_phase_complexity_score_")
+        assert not col.startswith("measurement_QC_flag_count_")
+        assert not col.startswith("Cs_fraction_")
+
+    # Genuinely additional columns from the supplemental files still show up.
+    assert "reason_for_recommendation" in result["wells"][0] or "reason_for_recommendation" in a1
+    assert "optical_remeasurement_priority_score" in result["columns"]
+    assert "missing_spectra_score" in result["columns"]
+
+    # No positional/identity pseudo-metric ("col_<tag>", "row_<tag>", ...)
+    # leaked into the metric-picker `columns` list.
+    for col in result["columns"]:
+        assert col not in ("col", "row", "well", "library")
+        assert not col.startswith("col_")
+        assert not col.startswith("row_")
+        assert not col.startswith("well_")
+
+    # Sanity: real metrics from the base and from the supplemental files are
+    # still present as selectable columns.
+    assert "xrd_priority_score" in result["columns"]
+    assert "A_site_entropy" in result["columns"]
+
+
+def test_get_heatmaps_falls_back_to_composition_and_optical_when_predictions_missing(service, db, tmp_path):
+    # If model_predictions_all_wells.csv is absent (e.g. an older or partial
+    # run), /heatmaps should still degrade to the older, narrower merge
+    # instead of returning nothing.
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "composition_descriptors_per_well.csv").write_text(
+        "well,row,col,Cs_fraction\nA1,A,1,0.5\nA2,A,2,0.7\n", encoding="utf-8"
+    )
+    (run_dir / "optical_features_per_well.csv").write_text(
+        "well,optical_heterogeneity_score_total\nA1,14.7\nA2,22.1\n", encoding="utf-8"
+    )
+
+    result = service.get_heatmaps(run_id, "user-A")
+
+    assert "Cs_fraction" in result["columns"]
+    assert "optical_heterogeneity_score_total" in result["columns"]
+    a1 = next(w for w in result["wells"] if w["well"] == "A1")
+    assert a1["optical_heterogeneity_score_total"] == 14.7
+
+
 def test_list_runs_returns_all_runs_for_owning_user(db, service):
     library_id = db.create_phase_mapper_library("user-A", "Lib A", "lib-a")
     first = db.create_phase_mapper_run(library_id, "/data/lib-a/runs/1")
@@ -398,6 +516,50 @@ def test_list_runs_raises_for_different_user(db, service):
     library_id = db.create_phase_mapper_library("user-A", "Lib A", "lib-a")
     with pytest.raises(LookupError):
         service.list_runs(library_id, "user-B")
+
+
+def test_list_runs_reconciles_status_from_returncode_file_without_calling_get_run(service, db, tmp_path):
+    # get_run reconciles a "running" DB row against a *.returncode file
+    # dropped by the subprocess, but list_runs previously just returned raw
+    # DB rows -- so a completed run could show "running" forever in a
+    # library's run history until someone individually polled GET /runs/{id}.
+    # This proves list_runs performs the same reconciliation itself.
+    library_id = db.create_phase_mapper_library("user-A", "Lib A", "lib-a")
+    run_dir = tmp_path / "run-dir"
+    run_dir.mkdir()
+    run_id = db.create_phase_mapper_run(library_id, str(run_dir))
+    db.update_phase_mapper_run(run_id, job_pid=os.getpid())
+    assert db.get_phase_mapper_run(run_id)["status"] == "running"
+
+    # Write the returncode file directly -- not via get_run -- to prove
+    # list_runs itself does the reconciliation.
+    (run_dir / f"{run_id}.returncode").write_text("0", encoding="utf-8")
+
+    runs = service.list_runs(library_id, "user-A")
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "succeeded"
+    # And the DB row itself was updated, not just the returned dict.
+    assert db.get_phase_mapper_run(run_id)["status"] == "succeeded"
+
+
+def test_list_runs_does_not_reconcile_already_terminal_rows(service, db, tmp_path, monkeypatch):
+    # A run already marked succeeded/failed shouldn't be re-checked -- no
+    # need to touch the filesystem for rows that are already terminal.
+    library_id = db.create_phase_mapper_library("user-A", "Lib A", "lib-a")
+    run_dir = tmp_path / "run-dir"
+    run_dir.mkdir()
+    run_id = db.create_phase_mapper_run(library_id, str(run_dir))
+    db.update_phase_mapper_run(run_id, status="succeeded")
+
+    def _boom(self, run):
+        raise AssertionError("_reconcile_run_status must not be called for an already-terminal row")
+
+    monkeypatch.setattr(PhaseMapperService, "_reconcile_run_status", _boom)
+
+    runs = service.list_runs(library_id, "user-A")
+
+    assert runs[0]["status"] == "succeeded"
 
 
 def test_get_run_download_bytes_zips_run_directory(service, db, tmp_path):
@@ -416,3 +578,30 @@ def test_get_run_download_bytes_raises_for_different_user(service, db, tmp_path)
     run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
     with pytest.raises(LookupError):
         service.get_run_download_bytes(run_id, "user-B")
+
+
+def test_get_run_download_bytes_excludes_job_internals(service, db, tmp_path):
+    # job_payload.json contains absolute server paths and the full pipeline
+    # config; run.log/error.log are raw subprocess output that can include
+    # tracebacks with absolute paths; *.returncode is pure job plumbing.
+    # None of these are pipeline output and none should leave the server.
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "parsed_reads_summary.csv").write_text("read_num\n1\n", encoding="utf-8")
+    (run_dir / "job_payload.json").write_text(
+        json.dumps({"job_dir": "/Users/someone/POLARIS/data/lib-a/runs/1", "config": {"paths": {"composition_map": "/Users/someone/uploads/composition.csv"}}}),
+        encoding="utf-8",
+    )
+    (run_dir / "run.log").write_text("Traceback (most recent call last):\n  File \"/Users/someone/app/pipeline.py\"\n", encoding="utf-8")
+    (run_dir / "error.log").write_text("ValueError at /Users/someone/app/pipeline.py:42", encoding="utf-8")
+    (run_dir / f"{run_id}.returncode").write_text("0", encoding="utf-8")
+
+    zip_bytes = service.get_run_download_bytes(run_id, "user-A")
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        names = zf.namelist()
+        assert "parsed_reads_summary.csv" in names
+        assert "job_payload.json" not in names
+        assert "run.log" not in names
+        assert "error.log" not in names
+        assert f"{run_id}.returncode" not in names
+        assert not any(n.endswith(".returncode") for n in names)

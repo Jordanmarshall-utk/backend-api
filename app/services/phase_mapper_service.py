@@ -51,7 +51,8 @@ class PhaseMapperService:
 
     def list_runs(self, library_id: int, user_id: str) -> list[dict[str, Any]]:
         self.get_library_owned(library_id, user_id)
-        return self.db.list_phase_mapper_runs(library_id)
+        runs = self.db.list_phase_mapper_runs(library_id)
+        return [self._reconcile_run_status(run) if run["status"] == "running" else run for run in runs]
 
     def get_library_owned(self, library_id: int, user_id: str) -> dict[str, Any]:
         library = self.db.get_phase_mapper_library(library_id)
@@ -148,21 +149,33 @@ class PhaseMapperService:
         self.db.update_phase_mapper_run(run_id, job_pid=process.pid)
         return self.db.get_phase_mapper_run(run_id)
 
+    def _reconcile_run_status(self, run: dict[str, Any]) -> dict[str, Any]:
+        """If `run` is still marked "running" but its subprocess has actually
+        finished (a `<run_id>.returncode` file exists in its directory),
+        update the DB row to the terminal status and return the refreshed row.
+
+        Callers are expected to only invoke this for rows already known to
+        have status == "running" -- already-terminal rows don't need (and
+        this doesn't re-check) reconciliation.
+        """
+        run_id = run["id"]
+        returncode_path = Path(run["dir_path"]) / f"{run_id}.returncode"
+        if returncode_path.exists():
+            return_code = int(returncode_path.read_text())
+            status = "succeeded" if return_code == 0 else "failed"
+            error_log = Path(run["dir_path"]) / "error.log"
+            error_message = error_log.read_text(encoding="utf-8") if error_log.exists() else ""
+            self.db.update_phase_mapper_run(
+                run_id, status=status, return_code=return_code, error_message=error_message,
+                frozen=(status == "succeeded"), completed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            return self.db.get_phase_mapper_run(run_id)
+        return run
+
     def get_run(self, run_id: int, user_id: str) -> dict[str, Any]:
         run = self._get_owned_run(run_id, user_id)
-
         if run["status"] == "running":
-            returncode_path = Path(run["dir_path"]) / f"{run_id}.returncode"
-            if returncode_path.exists():
-                return_code = int(returncode_path.read_text())
-                status = "succeeded" if return_code == 0 else "failed"
-                error_log = Path(run["dir_path"]) / "error.log"
-                error_message = error_log.read_text(encoding="utf-8") if error_log.exists() else ""
-                self.db.update_phase_mapper_run(
-                    run_id, status=status, return_code=return_code, error_message=error_message,
-                    frozen=(status == "succeeded"), completed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                )
-                run = self.db.get_phase_mapper_run(run_id)
+            run = self._reconcile_run_status(run)
         return run
 
     def delete_run(self, run_id: int, user_id: str) -> None:
@@ -192,13 +205,49 @@ class PhaseMapperService:
             records = [r for r in records if r.get("well") == well]
         return records
 
-    _HEATMAP_SOURCE_FILES = [
+    # model_predictions_all_wells.csv is written by the pipeline as `priority`
+    # (see phase_mapper/pipeline.py), itself built from
+    # `all_table = training.merge(predictions)` where
+    # `training = comp_desc.merge(optical)`. `priority` is a `.copy()` of
+    # `all_table`, so it retains every column of `training` (hence of both
+    # comp_desc and optical) plus the prediction columns. It is therefore a
+    # strict column superset of composition_descriptors_per_well.csv and
+    # optical_features_per_well.csv -- confirmed empirically against a real
+    # pipeline run (see the final-review-fix-report for the column diff).
+    #
+    # Critically, `compute_xrd_priority` (active_learning.py) also *mutates*
+    # three of those carried-over columns in place --
+    # optical_heterogeneity_score_total, pl_abs_disagreement_score, and
+    # optical_phase_complexity_score -- replacing their raw values with
+    # minmax-normalized ones. So model_predictions_all_wells.csv is not just
+    # a superset, it's the file with the *correct* (normalized, matching
+    # GET /predictions) values for those three metrics; the versions in
+    # optical_features_per_well.csv are stale/raw duplicates under the same
+    # column names.
+    #
+    # Because of this, when model_predictions_all_wells.csv is present it is
+    # used as the sole base and composition_descriptors_per_well.csv /
+    # optical_features_per_well.csv are skipped entirely (not merged) --
+    # merging them would just re-collide on ~1400+ duplicate columns and, for
+    # those three metrics, bury the correct normalized value under a renamed
+    # key. If it's absent, we fall back to the older, narrower base so the
+    # endpoint still returns something.
+    _HEATMAP_BASE_FILE = "model_predictions_all_wells.csv"
+    _HEATMAP_FALLBACK_BASE_FILES = [
         "composition_descriptors_per_well.csv",
         "optical_features_per_well.csv",
-        "model_predictions_all_wells.csv",
+    ]
+    # These carry genuinely additional columns not present in the base
+    # (e.g. reason_for_recommendation, optical_remeasurement_priority_score)
+    # alongside a lot of columns that just repeat the base's data for a
+    # subset of wells -- the merge logic below skips the latter rather than
+    # re-merging duplicates.
+    _HEATMAP_SUPPLEMENTAL_FILES = [
         "xrd_recommendations_next_wells.csv",
         "optical_remeasurement_recommendations.csv",
     ]
+
+    _HEATMAP_NON_METRIC_COLS = {"well", "row", "col", "library", "sample_key", "is_control", "replicate_group", "notes"}
 
     # Trailing tokens stripped from a source filename's stem to produce a
     # short, human-readable disambiguation tag (see _heatmap_source_tag).
@@ -222,35 +271,62 @@ class PhaseMapperService:
                 return stem[: -len(suffix)]
         return stem
 
-    def get_heatmaps(self, run_id: int, user_id: str) -> dict[str, Any]:
-        run = self._get_owned_run(run_id, user_id)
-        run_dir = run["dir_path"]
+    def _heatmap_merge_source(self, merged: pd.DataFrame, base_columns: set[str], path: Path, tag: str) -> pd.DataFrame:
+        """Left-merge one supplemental/fallback heatmap source file onto `merged`.
 
-        base_path = Path(run_dir) / self._HEATMAP_SOURCE_FILES[0]
-        if not base_path.exists():
-            return {"columns": [], "wells": []}
-        merged = pd.read_csv(base_path)
-
-        for filename in self._HEATMAP_SOURCE_FILES[1:]:
-            path = Path(run_dir) / filename
-            if not path.exists():
+        Columns already present in the base table (`base_columns`), or
+        positional/identity columns (well/row/col/...), are skipped entirely
+        rather than re-merged under a renamed key -- they're either
+        duplicate data we already have from the base, or not metrics at all.
+        A column that collides with something added by an *earlier*
+        non-base source file (not the base itself) is renamed with a
+        source-file tag so neither side's data is dropped.
+        """
+        other = pd.read_csv(path)
+        if "well" not in other.columns:
+            return merged
+        keep_cols = ["well"]
+        rename_map: dict[str, str] = {}
+        for c in other.columns:
+            if c == "well" or c in base_columns or c in self._HEATMAP_NON_METRIC_COLS:
                 continue
-            other = pd.read_csv(path)
-            tag = self._heatmap_source_tag(filename)
-            rename_map = {}
-            for c in other.columns:
-                if c == "well" or c not in merged.columns:
-                    continue
+            if c in merged.columns:
                 new_name = f"{c}_{tag}"
                 # Guard against the (unlikely) case where the disambiguated
                 # name itself already exists, so no column is ever dropped.
                 while new_name in merged.columns or new_name in rename_map.values():
                     new_name = f"{new_name}_2"
                 rename_map[c] = new_name
-            other = other.rename(columns=rename_map)
-            merged = merged.merge(other, on="well", how="left")
+            keep_cols.append(c)
+        if len(keep_cols) == 1:
+            return merged  # nothing new to add from this file
+        other = other[keep_cols].rename(columns=rename_map)
+        return merged.merge(other, on="well", how="left")
 
-        non_metric_cols = {"well", "row", "col", "library", "sample_key", "is_control", "replicate_group", "notes"}
+    def get_heatmaps(self, run_id: int, user_id: str) -> dict[str, Any]:
+        run = self._get_owned_run(run_id, user_id)
+        run_dir = Path(run["dir_path"])
+
+        base_path = run_dir / self._HEATMAP_BASE_FILE
+        if base_path.exists():
+            merged = pd.read_csv(base_path)
+            remaining_sources = list(self._HEATMAP_SUPPLEMENTAL_FILES)
+        else:
+            fallback_base_path = run_dir / self._HEATMAP_FALLBACK_BASE_FILES[0]
+            if not fallback_base_path.exists():
+                return {"columns": [], "wells": []}
+            merged = pd.read_csv(fallback_base_path)
+            remaining_sources = self._HEATMAP_FALLBACK_BASE_FILES[1:] + list(self._HEATMAP_SUPPLEMENTAL_FILES)
+
+        base_columns = set(merged.columns)
+        for filename in remaining_sources:
+            path = run_dir / filename
+            if not path.exists():
+                continue
+            tag = self._heatmap_source_tag(filename)
+            merged = self._heatmap_merge_source(merged, base_columns, path, tag)
+
+        non_metric_cols = self._HEATMAP_NON_METRIC_COLS
         numeric_cols = [
             c for c in merged.columns
             if c not in non_metric_cols and pd.api.types.is_numeric_dtype(merged[c])
@@ -258,12 +334,25 @@ class PhaseMapperService:
         records = json.loads(merged.to_json(orient="records"))
         return {"columns": numeric_cols, "wells": records}
 
+    # Job-bookkeeping files written alongside a run's actual pipeline output
+    # artifacts. These carry server-internal details -- job_payload.json
+    # contains absolute server paths and the full pipeline config (including
+    # absolute composition-map paths); run.log/error.log are raw subprocess
+    # stdout/stderr that can include tracebacks with absolute paths on
+    # failure; *.returncode is pure job plumbing. None of them are pipeline
+    # output and none should ever leave the server in a downloaded zip.
+    _DOWNLOAD_EXCLUDED_FILENAMES = {"job_payload.json", "run.log", "error.log"}
+
+    @classmethod
+    def _is_download_excluded(cls, filename: str) -> bool:
+        return filename in cls._DOWNLOAD_EXCLUDED_FILENAMES or filename.endswith(".returncode")
+
     def get_run_download_bytes(self, run_id: int, user_id: str) -> bytes:
         run = self._get_owned_run(run_id, user_id)
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for path in Path(run["dir_path"]).glob("*"):
-                if path.is_file():
+                if path.is_file() and not self._is_download_excluded(path.name):
                     zf.write(path, arcname=path.name)
         return buffer.getvalue()
 

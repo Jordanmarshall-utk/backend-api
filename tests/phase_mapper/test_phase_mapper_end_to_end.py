@@ -133,7 +133,13 @@ def test_full_library_pipeline_round_trip_over_http(client):
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        assert "parsed_reads_summary.csv" in zf.namelist()
+        names = zf.namelist()
+        assert "parsed_reads_summary.csv" in names
+        # Finding 3 (final review): job bookkeeping files leak server
+        # filesystem paths and job internals and must never be in the zip.
+        assert "job_payload.json" not in names
+        assert "run.log" not in names
+        assert not any(n.endswith(".returncode") for n in names)
 
     # Finding 5: frozen sample_key must be keyed off the real library name
     # ("Fixture Library::A1"), not the literal placeholder string "library".
