@@ -1,0 +1,82 @@
+profiles:
+  bda_bai_6row:
+    display_name: "BDAPbI4-FAPbI3 + BAI (A-F, 0/1/5/10/15/20%)"
+    source_notebook: "BDAPbI4-FAPbI3 binary + BAI additive.ipynb"
+    filename_patterns: ["rp additive 95-120 degrees time evolution"]
+    two_d_precursor: "BDAPbI4"
+    three_d_precursor: "FAPbI3"
+    additive: "BAI"
+    rows: [A, B, C, D, E, F]
+    additive_percent_by_row: {A: 0, B: 1, C: 5, D: 10, E: 15, F: 20}
+    host_stock_molarity: 0.3
+    total_volume_ul: 50
+    additive_volume_ul: 5
+    two_d_spacer_stoichiometry: 1
+
+  bda_bai_8row:
+    display_name: "BDAPbI4-FAPbI3 + BAI (A-H full series)"
+    filename_patterns: ["bdapbi4", "bda bai"]
+    two_d_precursor: "BDAPbI4"
+    three_d_precursor: "FAPbI3"
+    additive: "BAI"
+    rows: [A, B, C, D, E, F, G, H]
+    additive_percent_by_row: {A: 0, B: 1, C: 2.5, D: 5, E: 7.5, F: 10, G: 15, H: 20}
+    host_stock_molarity: 0.3
+    total_volume_ul: 50
+    additive_volume_ul: 5
+    two_d_spacer_stoichiometry: 1
+
+  bda_macl_8row:
+    display_name: "BDAPbI4-FAPbI3 + MACl"
+    source_notebook: "BDAPbI4-FAPbI3 binary gradient + MACl additive.ipynb"
+    filename_patterns: ["050226_rp additive macl", "050226 rp additive macl"]
+    two_d_precursor: "BDAPbI4"
+    three_d_precursor: "FAPbI3"
+    additive: "MACl"
+    rows: [A, B, C, D, E, F, G, H]
+    additive_percent_by_row: {A: 0, B: 1, C: 2.5, D: 5, E: 7.5, F: 10, G: 15, H: 20}
+    host_stock_molarity: 0.3
+    total_volume_ul: 50
+    additive_volume_ul: 5
+    two_d_spacer_stoichiometry: 1
+
+  bda_oai_8row:
+    display_name: "BDAPbI4-FAPbI3 + OAI"
+    source_notebook: "BDAPbI4-FAPbI3 binary gradient + OAI additive.ipynb"
+    filename_patterns: ["rp additive oai", "0501626_rp additive oai"]
+    two_d_precursor: "BDAPbI4"
+    three_d_precursor: "FAPbI3"
+    additive: "OAI"
+    rows: [A, B, C, D, E, F, G, H]
+    additive_percent_by_row: {A: 0, B: 1, C: 2.5, D: 5, E: 7.5, F: 10, G: 15, H: 20}
+    host_stock_molarity: 0.3
+    total_volume_ul: 50
+    additive_volume_ul: 5
+    two_d_spacer_stoichiometry: 1
+
+  3ampi_bai_8row:
+    display_name: "3AMPIPbI4-FAPbI3 + BAI"
+    source_notebook: "3AMP-FAPbI3 binary gradient + BAI additive.ipynb"
+    filename_patterns: ["3amp-fa with bai", "3amp bai"]
+    two_d_precursor: "3AMPIPbI4"
+    three_d_precursor: "FAPbI3"
+    additive: "BAI"
+    rows: [A, B, C, D, E, F, G, H]
+    additive_percent_by_row: {A: 0, B: 1, C: 2.5, D: 5, E: 7.5, F: 10, G: 15, H: 20}
+    host_stock_molarity: 0.3
+    total_volume_ul: 50
+    additive_volume_ul: 5
+    two_d_spacer_stoichiometry: 1
+
+  3ampi_macl_8row:
+    display_name: "3AMPIPbI4-FAPbI3 + MACl"
+    filename_patterns: ["3amp-fa rp additive macl", "3amp macl"]
+    two_d_precursor: "3AMPIPbI4"
+    three_d_precursor: "FAPbI3"
+    additive: "MACl"
+    rows: [A, B, C, D, E, F, G, H]
+    additive_percent_by_row: {A: 0, B: 1, C: 2.5, D: 5, E: 7.5, F: 10, G: 15, H: 20}
+    host_stock_molarity: 0.3
+    total_volume_ul: 50
+    additive_volume_ul: 5
+    two_d_spacer_stoichiometry: 1

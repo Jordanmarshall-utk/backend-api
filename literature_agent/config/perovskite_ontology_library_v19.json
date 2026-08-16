@@ -345,6 +345,7 @@
       "APbX3",
       "ABX3",
       "FAPbI3",
+      "formamidinium lead iodide",
       "MAPbI3",
       "CsPbI3",
       "FAPbBr3",
@@ -1000,6 +1001,16 @@
       "1000 h",
       "retention",
       "retained"
+    ]
+  },
+  "search_concepts": {
+    "FAPbI3": [
+      "FAPbI3",
+      "formamidinium lead iodide",
+      "alpha-FAPbI3",
+      "alpha FAPbI3",
+      "α-FAPbI3",
+      "black-phase FAPbI3"
     ]
   },
   "figure_task_ontology": {

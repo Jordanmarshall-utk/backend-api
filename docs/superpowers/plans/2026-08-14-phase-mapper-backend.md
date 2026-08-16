@@ -16,7 +16,21 @@
 - Upload validation keeps the reference app's semantics: fail only on a missing `well` column; warn (don't block) on incomplete well coverage or composition fractions not summing to ~1. (Design doc, "Error handling".)
 - Same-user concurrent "Run Pipeline" calls on one library return `409` instead of racing. (Design doc, "Error handling".)
 - `library::well` remains the sample identity; manual XRD labels stay authoritative over automatic proposals (carried forward from the handoff doc; enforced by later tasks in the follow-up "remaining tabs" plan, not this skeleton).
-- Python 3.12, existing `backend-api` dependency set (`pyproject.toml`) — no new third-party packages needed for this plan (pandas/numpy/scikit-learn/openpyxl/matplotlib/scipy are already dependencies).
+- Python 3.12, existing `backend-api` dependency set (`pyproject.toml`) — pandas/numpy/scikit-learn/openpyxl/matplotlib/scipy are already direct dependencies. `pyyaml` is currently only a *transitive* dependency (via `langchain-core`); Task 3 adds it as an explicit direct dependency since the ported `config.py` imports it directly and must not rely on another package's transitive pin.
+
+## Working directory note
+
+Every bash snippet in Tasks 1–7 and 9 starts with `cd backend-api`, written
+as if run from one level above a plain `backend-api` checkout. When this
+plan executes inside an SDD worktree
+(`backend-api/.claude/worktrees/<name>/`), that worktree's root **is**
+backend-api's root — `cd backend-api` there is wrong (no such subdirectory)
+and should be treated as a no-op; run the rest of each snippet directly from
+the current directory. Task 8 is different: it touches
+`shared-types/openapi/polaris-v1.yaml`, which lives in the separate
+`shared-types` git repository, not inside `backend-api` at all — it is not
+reachable from this worktree and needs its own workspace (see Task 8's notes
+for how that task's execution is handled).
 
 ## Scope note
 
@@ -554,7 +568,7 @@ git commit -m "feat: add per-user path helpers for phase-mapper libraries"
 cd backend-api
 mkdir -p app/services/phase_mapper
 touch app/services/phase_mapper/__init__.py
-SRC="../../Downloads/POLARIS_Integration_Handoff_20260810/src"
+SRC="/Users/arielthompson/Downloads/POLARIS_Integration_Handoff_20260810/src"
 for f in config utils composition_features spectral_features plate_reader \
          xrd_processing xrd_labels xrd_auto_assignment xrd_peak_fitting \
          active_learning active_learning_review experiment_profiles \
@@ -563,12 +577,38 @@ for f in config utils composition_features spectral_features plate_reader \
 done
 ```
 
-Note: this plan assumes the handoff package sits at
-`/Users/arielthompson/Downloads/POLARIS_Integration_Handoff_20260810`, two
-directories up from `backend-api`, as it does in the current checkout —
-adjust the `$SRC` path if the checkout differs.
+Note: `$SRC` is an absolute path, deliberately — this task may run from the
+original `backend-api` checkout or from a nested git worktree under it
+(e.g. `backend-api/.claude/worktrees/<name>/`), and a relative path like
+`../../Downloads/...` resolves to a different, wrong location depending on
+which. Use the absolute path as written unless the handoff package is
+genuinely at a different location on disk, in which case update `$SRC`
+accordingly (not by making it relative).
 
-- [ ] **Step 2: Fix internal imports**
+- [ ] **Step 2: Declare `pyyaml` as a direct dependency**
+
+`config.py` (just copied) does `import yaml` directly. `pyyaml` is already
+installed today only because `langchain-core` happens to pin it — relying on
+that would silently break if `langchain-core` ever drops the pin. Add it to
+`backend-api/pyproject.toml`'s `dependencies` list, next to the other
+already-declared runtime deps (e.g. right after `"scipy"`):
+
+```toml
+  "scipy",
+  "pyyaml>=6.0",
+```
+
+Then reinstall so the environment matches the manifest:
+
+```bash
+cd backend-api
+pip install -e ".[dev]"
+python -c "import yaml; print(yaml.__version__)"
+```
+
+Expected: prints a version string, no `ModuleNotFoundError`.
+
+- [ ] **Step 3: Fix internal imports**
 
 The copied files import each other as `from src.xxx import yyy`. Rewrite those
 to `from app.services.phase_mapper.xxx import yyy` throughout the copied
@@ -588,11 +628,11 @@ grep -rn "\bsrc\." app/services/phase_mapper/*.py
 
 Expected: no output.
 
-- [ ] **Step 3: Copy the existing unit tests verbatim, fixing their imports the same way**
+- [ ] **Step 4: Copy the existing unit tests verbatim, fixing their imports the same way**
 
 ```bash
 cd backend-api
-TESTS="../../Downloads/POLARIS_Integration_Handoff_20260810/tests"
+TESTS="/Users/arielthompson/Downloads/POLARIS_Integration_Handoff_20260810/tests"
 for f in test_composition_features test_plate_reader test_spectral_features \
          test_active_learning test_active_learning_review test_experiment_profiles \
          test_modeling_feature_families test_multitask_mlp test_pipeline_library_merge \
@@ -619,12 +659,12 @@ pytestmark = pytest.mark.skip(reason="spin-coating optimizer is a later sub-proj
 ' tests/phase_mapper/test_spin_coating_optimization.py
 ```
 
-- [ ] **Step 4: Run the copied test suite to verify the port is faithful**
+- [ ] **Step 5: Run the copied test suite to verify the port is faithful**
 
 Run: `cd backend-api && pytest tests/phase_mapper/ -v --ignore=tests/phase_mapper/test_phase_mapper_database.py --ignore=tests/phase_mapper/test_phase_mapper_paths.py`
-Expected: PASS for every copied test file except the skipped spin-coating one. If any test fails, the failure is almost certainly an import-path issue from Step 2 (fix the import, don't touch the assertion — the algorithmic behavior must not change).
+Expected: PASS for every copied test file except the skipped spin-coating one. If any test fails, the failure is almost certainly an import-path issue from Step 3 (fix the import, don't touch the assertion — the algorithmic behavior must not change).
 
-- [ ] **Step 5: Write the background-job runner entry point**
+- [ ] **Step 6: Write the background-job runner entry point**
 
 This is new code (not a copy): a thin subprocess entry point, modeled
 directly on `app/tools/literature_agent_job_runner.py`, that loads a job
@@ -675,11 +715,11 @@ absolute paths into `cfg["paths"]`, so `None` is safe (see
 `_config_dir` is absent — never exercised here because every path this
 plan writes is already absolute).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 cd backend-api
-git add app/services/phase_mapper/ app/tools/phase_mapper_pipeline_runner.py tests/phase_mapper/
+git add app/services/phase_mapper/ app/tools/phase_mapper_pipeline_runner.py tests/phase_mapper/ pyproject.toml
 git commit -m "feat: port phase-mapper pipeline core from reference app, unmodified"
 ```
 

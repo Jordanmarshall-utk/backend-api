@@ -1,6 +1,7 @@
 """
 Unified LLM client for POLARIS.
-Supports Qwen (Hugging Face router) and Google Gemini.
+Supports Qwen through either a hosted OpenAI-compatible router or local Ollama,
+and Google Gemini.
 """
 
 import logging
@@ -20,6 +21,11 @@ DEFAULT_MODELS = {
     "qwen": "Qwen/Qwen2.5-72B-Instruct",
     "gemini": "gemini-2.0-flash",
 }
+
+
+def _is_local_base_url(base_url: Optional[str]) -> bool:
+    value = (base_url or "").lower()
+    return "localhost" in value or "127.0.0.1" in value
 
 
 def generate_text(
@@ -48,6 +54,15 @@ def generate_text(
             f"Unsupported LLM provider: {provider}. Use one of: {', '.join(SUPPORTED_PROVIDERS)}."
         )
 
+    qwen_url = qwen_base_url or os.getenv("QWEN_BASE_URL") or "https://router.huggingface.co/v1"
+
+    if not api_key or not api_key.strip():
+        if provider == "qwen" and _is_local_base_url(qwen_url):
+            api_key = "ollama-local"
+        else:
+            label = "Gemini" if provider == "gemini" else "Hugging Face"
+            raise ValueError(f"API key is empty. Set your {label} API key in Settings.")
+
     if not api_key or not api_key.strip():
         label = "Gemini" if provider == "gemini" else "Hugging Face"
         raise ValueError(f"API key is empty. Set your {label} API key in Settings.")
@@ -61,7 +76,7 @@ def generate_text(
         prompt,
         api_key.strip(),
         model_id,
-        qwen_base_url or os.getenv("QWEN_BASE_URL") or "https://router.huggingface.co/v1",
+        qwen_url,
     )
 
 

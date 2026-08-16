@@ -17,6 +17,11 @@ class LlmRuntimeConfig:
     qwen_base_url: Optional[str] = None
 
 
+def _is_local_qwen_url(url: str | None) -> bool:
+    value = (url or "").lower()
+    return "localhost" in value or "127.0.0.1" in value
+
+
 def get_llm_config(memory: Any | None = None) -> LlmRuntimeConfig:
     """
     Read LLM settings from MemoryManager DB and sync to os.environ.
@@ -39,8 +44,8 @@ def get_llm_config(memory: Any | None = None) -> LlmRuntimeConfig:
     else:
         model = memory.get_var("llm_model") or os.getenv("LLM_MODEL") or "Qwen/Qwen2.5-72B-Instruct"
         qwen_base_url = (
-            memory.get_var("qwen_base_url")
-            or os.getenv("QWEN_BASE_URL")
+            os.getenv("QWEN_BASE_URL")
+            or memory.get_var("qwen_base_url")
             or "https://router.huggingface.co/v1"
         )
 
@@ -54,6 +59,8 @@ def get_llm_config(memory: Any | None = None) -> LlmRuntimeConfig:
 
 def require_api_key(memory: Any | None = None) -> LlmRuntimeConfig:
     cfg = get_llm_config(memory)
+    if cfg.provider == "qwen" and _is_local_qwen_url(cfg.qwen_base_url):
+        return cfg
     if not cfg.api_key:
         label = "Google Gemini" if cfg.provider == "gemini" else "Hugging Face"
         raise ValueError(
