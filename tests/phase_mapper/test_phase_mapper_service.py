@@ -398,3 +398,21 @@ def test_list_runs_raises_for_different_user(db, service):
     library_id = db.create_phase_mapper_library("user-A", "Lib A", "lib-a")
     with pytest.raises(LookupError):
         service.list_runs(library_id, "user-B")
+
+
+def test_get_run_download_bytes_zips_run_directory(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "parsed_reads_summary.csv").write_text("read_num\n1\n", encoding="utf-8")
+    zip_bytes = service.get_run_download_bytes(run_id, "user-A")
+
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        assert "parsed_reads_summary.csv" in zf.namelist()
+        assert zf.read("parsed_reads_summary.csv") == b"read_num\n1\n"
+
+
+def test_get_run_download_bytes_raises_for_different_user(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    with pytest.raises(LookupError):
+        service.get_run_download_bytes(run_id, "user-B")

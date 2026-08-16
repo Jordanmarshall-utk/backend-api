@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel
 
 from app.core.auth import AuthUser
@@ -231,3 +231,20 @@ def get_heatmaps(
         return svc.get_heatmaps(run_id, user.id)
     except LookupError:
         raise HTTPException(status_code=404, detail="Run not found")
+
+
+@router.get("/phase-mapper/runs/{run_id}/download")
+def download_run(
+    run_id: int,
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> Response:
+    svc = get_service()
+    try:
+        content = svc.get_run_download_bytes(run_id, user.id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="run_{run_id}_outputs.zip"'},
+    )

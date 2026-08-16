@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -255,6 +257,15 @@ class PhaseMapperService:
         ]
         records = json.loads(merged.to_json(orient="records"))
         return {"columns": numeric_cols, "wells": records}
+
+    def get_run_download_bytes(self, run_id: int, user_id: str) -> bytes:
+        run = self._get_owned_run(run_id, user_id)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in Path(run["dir_path"]).glob("*"):
+                if path.is_file():
+                    zf.write(path, arcname=path.name)
+        return buffer.getvalue()
 
 
 def _pid_exists(pid: int) -> bool:
