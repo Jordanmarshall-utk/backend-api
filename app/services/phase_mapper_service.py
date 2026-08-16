@@ -108,12 +108,21 @@ class PhaseMapperService:
             "job_id": str(run_id), "job_dir": str(job_dir), "run_dir": str(run_dir), "config": cfg,
         }), encoding="utf-8")
 
-        runner = Path(__file__).resolve().parents[1] / "tools" / "phase_mapper_pipeline_runner.py"
+        # cwd/env are set explicitly rather than relying on the venv's editable-install
+        # metadata to resolve `import app...` in the subprocess: that metadata records
+        # an absolute source path baked in at `pip install -e .` time, which goes stale
+        # (and the subprocess can no longer import app at all) whenever the checkout is
+        # moved or an old worktree it was installed from is removed.
+        project_root = Path(__file__).resolve().parents[2]
+        runner = project_root / "app" / "tools" / "phase_mapper_pipeline_runner.py"
         log_path = job_dir / "run.log"
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (str(project_root), env.get("PYTHONPATH", "")) if p)
         with log_path.open("w", encoding="utf-8") as log:
             process = subprocess.Popen(
                 [sys.executable, str(runner), str(payload_path)],
                 stdout=log, stderr=subprocess.STDOUT, text=True,
+                cwd=str(project_root), env=env,
             )
         self.db.update_phase_mapper_run(run_id, job_pid=process.pid)
         return self.db.get_phase_mapper_run(run_id)
