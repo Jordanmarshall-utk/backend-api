@@ -12,6 +12,7 @@ from app.api.v1 import (
     llm,
     mcp,
     ml_session,
+    phase_mapper,
     pipeline,
     session,
     settings,
@@ -36,3 +37,4 @@ api_router.include_router(session.router, tags=["session"])
 api_router.include_router(history.router, tags=["history"])
 api_router.include_router(pipeline.router, tags=["pipeline"])
 api_router.include_router(literature.router, tags=["literature"])
+api_router.include_router(phase_mapper.router, tags=["phase-mapper"])
