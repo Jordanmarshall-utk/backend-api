@@ -53,6 +53,21 @@ class PhaseMapperService:
             raise LookupError(f"Library {library_id} not found for this user")
         return library
 
+    def _get_owned_run(self, run_id: int, user_id: str) -> dict[str, Any]:
+        run = self.db.get_phase_mapper_run(run_id)
+        if run is None:
+            raise LookupError(f"Run {run_id} not found")
+        self.get_library_owned(run["library_id"], user_id)
+        return run
+
+    @staticmethod
+    def _read_csv_records(run_dir: str, filename: str) -> list[dict[str, Any]]:
+        csv_path = Path(run_dir) / filename
+        if not csv_path.exists():
+            return []
+        df = pd.read_csv(csv_path)
+        return json.loads(df.to_json(orient="records"))
+
     @staticmethod
     def _storage_key(library: dict[str, Any]) -> str:
         """On-disk storage key for a library.
@@ -128,10 +143,7 @@ class PhaseMapperService:
         return self.db.get_phase_mapper_run(run_id)
 
     def get_run(self, run_id: int, user_id: str) -> dict[str, Any]:
-        run = self.db.get_phase_mapper_run(run_id)
-        if run is None:
-            raise LookupError(f"Run {run_id} not found")
-        self.get_library_owned(run["library_id"], user_id)  # raises LookupError if not owned
+        run = self._get_owned_run(run_id, user_id)
 
         if run["status"] == "running":
             returncode_path = Path(run["dir_path"]) / f"{run_id}.returncode"
@@ -148,23 +160,12 @@ class PhaseMapperService:
         return run
 
     def delete_run(self, run_id: int, user_id: str) -> None:
-        run = self.db.get_phase_mapper_run(run_id)
-        if run is None:
-            raise LookupError(f"Run {run_id} not found")
-        self.get_library_owned(run["library_id"], user_id)  # raises LookupError if not owned
+        run = self._get_owned_run(run_id, user_id)
         self.db.delete_phase_mapper_run(run_id)
 
     def get_reads(self, run_id: int, user_id: str) -> list[dict[str, Any]]:
-        run = self.db.get_phase_mapper_run(run_id)
-        if run is None:
-            raise LookupError(f"Run {run_id} not found")
-        self.get_library_owned(run["library_id"], user_id)
-
-        csv_path = Path(run["dir_path"]) / "parsed_reads_summary.csv"
-        if not csv_path.exists():
-            return []
-        df = pd.read_csv(csv_path)
-        return json.loads(df.to_json(orient="records"))
+        run = self._get_owned_run(run_id, user_id)
+        return self._read_csv_records(run["dir_path"], "parsed_reads_summary.csv")
 
 
 def _pid_exists(pid: int) -> bool:
