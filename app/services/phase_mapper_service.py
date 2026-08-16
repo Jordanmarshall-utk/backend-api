@@ -101,8 +101,10 @@ class PhaseMapperService:
             if returncode_path.exists():
                 return_code = int(returncode_path.read_text())
                 status = "succeeded" if return_code == 0 else "failed"
+                error_log = Path(run["dir_path"]) / "error.log"
+                error_message = error_log.read_text(encoding="utf-8") if error_log.exists() else ""
                 self.db.update_phase_mapper_run(
-                    run_id, status=status, return_code=return_code,
+                    run_id, status=status, return_code=return_code, error_message=error_message,
                     frozen=(status == "succeeded"), completed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 )
                 run = self.db.get_phase_mapper_run(run_id)

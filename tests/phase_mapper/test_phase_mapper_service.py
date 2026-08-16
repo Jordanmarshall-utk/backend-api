@@ -82,6 +82,17 @@ def test_get_run_transitions_to_failed_when_returncode_file_is_nonzero(service, 
     assert not run["frozen"]
 
 
+def test_get_run_populates_error_message_from_error_log_on_failure(service, db, tmp_path):
+    run_id, run_dir = _make_running_run(db, tmp_path, job_pid=os.getpid())
+    (run_dir / f"{run_id}.returncode").write_text("1")
+    (run_dir / "error.log").write_text("Traceback (most recent call last):\nValueError: boom\n")
+
+    run = service.get_run(run_id, "user-A")
+
+    assert run["status"] == "failed"
+    assert "ValueError: boom" in run["error_message"]
+
+
 def test_get_run_stays_running_when_returncode_file_absent(service, db, tmp_path):
     # Even with a still-alive PID and no returncode file yet, status must remain "running".
     run_id, run_dir = _make_running_run(db, tmp_path, job_pid=os.getpid())
