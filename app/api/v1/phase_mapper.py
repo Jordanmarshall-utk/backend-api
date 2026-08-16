@@ -96,3 +96,42 @@ async def upload_file(
         raise HTTPException(status_code=404, detail="Library not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+class RunResponse(BaseModel):
+    id: int
+    library_id: int
+    status: str
+    dir_path: str
+    job_pid: int | None
+    return_code: int | None
+    error_message: str
+    frozen: bool
+    created_at: str
+    completed_at: str | None
+
+
+@router.post("/phase-mapper/libraries/{library_id}/runs", response_model=RunResponse)
+def start_run(
+    library_id: int,
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> dict:
+    svc = get_service()
+    try:
+        return svc.start_run(library_id, user.id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Library not found")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/phase-mapper/runs/{run_id}", response_model=RunResponse)
+def get_run(
+    run_id: int,
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> dict:
+    svc = get_service()
+    try:
+        return svc.get_run(run_id, user.id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Run not found")
