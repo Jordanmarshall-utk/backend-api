@@ -89,3 +89,43 @@ def test_get_run_stays_running_when_returncode_file_absent(service, db, tmp_path
     run = service.get_run(run_id, "user-A")
 
     assert run["status"] == "running"
+
+
+def _make_run_with_dir(db, tmp_path, *, user_id: str = "user-A") -> tuple[int, "os.PathLike"]:
+    library_id = db.create_phase_mapper_library(user_id, "Lib A", "lib-a")
+    run_dir = tmp_path / "run-dir"
+    run_dir.mkdir()
+    run_id = db.create_phase_mapper_run(library_id, str(run_dir))
+    return run_id, run_dir
+
+
+def test_get_reads_returns_csv_records_for_owning_user(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "parsed_reads_summary.csv").write_text(
+        "well,intensity\nA1,123.4\nA2,567.8\n", encoding="utf-8"
+    )
+
+    reads = service.get_reads(run_id, "user-A")
+
+    assert reads == [
+        {"well": "A1", "intensity": 123.4},
+        {"well": "A2", "intensity": 567.8},
+    ]
+
+
+def test_get_reads_raises_for_different_user(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "parsed_reads_summary.csv").write_text(
+        "well,intensity\nA1,123.4\n", encoding="utf-8"
+    )
+
+    with pytest.raises(LookupError):
+        service.get_reads(run_id, "user-B")
+
+
+def test_get_reads_returns_empty_list_when_csv_absent(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+
+    reads = service.get_reads(run_id, "user-A")
+
+    assert reads == []
