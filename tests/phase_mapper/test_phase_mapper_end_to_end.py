@@ -1,56 +1,107 @@
 """End-to-end test: create a library, upload fixtures, run the pipeline as a
-real subprocess, poll to completion, and fetch the Reads tab.
+real subprocess, poll to completion, and fetch the Reads tab — all driven
+through FastAPI's TestClient (real HTTP requests), not by calling
+PhaseMapperService directly.
+
+Every other route-layer test in this suite (test_phase_mapper_api.py,
+test_phase_mapper_runs_api.py, test_phase_mapper_reads_api.py) mocks the
+service out with a MagicMock, so this is the only test that exercises the
+route <-> service seam — request parsing, get_current_user -> user.id
+propagation, HTTPException mapping, and response_model serialization against
+a real DB dict — with real objects on both sides. The pipeline subprocess
+still actually executes; only the entry point changes from direct Python
+calls to HTTP requests against the app.
 """
 import time
 from pathlib import Path
 
+import pandas as pd
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from app.services.phase_mapper_service import PhaseMapperService
+from app.api.v1.phase_mapper import router
+from app.core.auth import AuthUser
 from app.tools.database import DatabaseManager
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def _mock_user():
+    return AuthUser(id="user-1", email="test@example.com")
+
+
 @pytest.fixture
-def service(tmp_path, monkeypatch):
+def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     from app.db import engine as engine_module
     engine_module._engine = None
     monkeypatch.setattr("app.tools.phase_mapper_paths.get_user_data_dir", lambda: str(tmp_path))
-    db = DatabaseManager()
-    db.init_schema()
-    yield PhaseMapperService(db)
+
+    DatabaseManager().init_schema()
+
+    app = FastAPI()
+    app.include_router(router)
+    import app.core.deps as deps_module
+    app.dependency_overrides[deps_module.get_current_user] = _mock_user
+
+    yield TestClient(app)
     engine_module._engine = None
 
 
 @pytest.mark.slow
-def test_full_library_pipeline_round_trip(service):
-    library = service.create_library("user-1", "Fixture Library")
+def test_full_library_pipeline_round_trip_over_http(client):
+    resp = client.post("/phase-mapper/libraries", json={"name": "Fixture Library"})
+    assert resp.status_code == 200
+    library = resp.json()
 
-    import io
-    from fastapi import UploadFile
+    resp = client.post(
+        f"/phase-mapper/libraries/{library['id']}/uploads/composition",
+        files={"file": ("composition_map_fixture.csv", (_FIXTURES / "composition_map_fixture.csv").read_bytes(), "text/csv")},
+    )
+    assert resp.status_code == 200
+    assert "path" not in resp.json()  # finding 4: no server filesystem path leaked
 
-    async def _upload(path: Path, save_fn):
-        upload = UploadFile(filename=path.name, file=io.BytesIO(path.read_bytes()))
-        await save_fn(library["id"], "user-1", "composition" if "composition" in path.name else "plate_reader", upload)
+    resp = client.post(
+        f"/phase-mapper/libraries/{library['id']}/uploads/plate_reader",
+        files={"file": ("plate_reader_fixture.csv", (_FIXTURES / "plate_reader_fixture.csv").read_bytes(), "text/csv")},
+    )
+    assert resp.status_code == 200
 
-    import asyncio
-    asyncio.run(_upload(_FIXTURES / "composition_map_fixture.csv", service.save_upload))
-    asyncio.run(_upload(_FIXTURES / "plate_reader_fixture.csv", service.save_upload))
-
-    run = service.start_run(library["id"], "user-1")
+    resp = client.post(f"/phase-mapper/libraries/{library['id']}/runs")
+    assert resp.status_code == 200
+    run = resp.json()
     assert run["status"] == "running"
+    assert "dir_path" not in run  # finding 4: no server filesystem path leaked
 
     deadline = time.time() + 60
     while time.time() < deadline:
-        run = service.get_run(run["id"], "user-1")
+        resp = client.get(f"/phase-mapper/runs/{run['id']}")
+        assert resp.status_code == 200
+        run = resp.json()
         if run["status"] != "running":
             break
         time.sleep(1)
 
     assert run["status"] == "succeeded", run["error_message"]
 
-    reads = service.get_reads(run["id"], "user-1")
+    resp = client.get(f"/phase-mapper/runs/{run['id']}/reads")
+    assert resp.status_code == 200
+    reads = resp.json()
     assert len(reads) >= 1
     assert reads[0]["read_type"] == "absorbance"
+
+    # Finding 5: frozen sample_key must be keyed off the real library name
+    # ("Fixture Library::A1"), not the literal placeholder string "library".
+    db = DatabaseManager()
+    run_row = db.get_phase_mapper_run(run["id"])
+    descriptors = pd.read_csv(Path(run_row["dir_path"]) / "composition_descriptors_per_well.csv")
+    assert descriptors["sample_key"].str.startswith("Fixture Library::").all()
+    assert not descriptors["sample_key"].str.startswith("library::").any()
+
+    # Finding 3: a completed run can be deleted, e.g. to let a user manually
+    # clear a stuck run and unblock starting a new one.
+    resp = client.delete(f"/phase-mapper/runs/{run['id']}")
+    assert resp.status_code == 200
+    resp = client.get(f"/phase-mapper/runs/{run['id']}")
+    assert resp.status_code == 404

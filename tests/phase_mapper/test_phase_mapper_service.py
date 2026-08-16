@@ -140,3 +140,61 @@ def test_get_reads_returns_empty_list_when_csv_absent(service, db, tmp_path):
     reads = service.get_reads(run_id, "user-A")
 
     assert reads == []
+
+
+def test_delete_run_removes_row_and_clears_active_run(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    library_id = db.get_phase_mapper_run(run_id)["library_id"]
+    assert db.has_active_phase_mapper_run(library_id) is True  # newly-created runs start "running"
+
+    service.delete_run(run_id, "user-A")
+
+    assert db.get_phase_mapper_run(run_id) is None
+    assert db.has_active_phase_mapper_run(library_id) is False
+
+
+def test_delete_run_raises_for_different_user(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+
+    with pytest.raises(LookupError):
+        service.delete_run(run_id, "user-B")
+
+
+def test_delete_run_raises_for_nonexistent_run(service):
+    with pytest.raises(LookupError):
+        service.delete_run(999999, "user-A")
+
+
+def test_two_libraries_with_same_name_get_distinct_storage_dirs(service, monkeypatch, tmp_path):
+    monkeypatch.setattr("app.tools.phase_mapper_paths.get_user_data_dir", lambda: str(tmp_path))
+
+    lib_1 = service.create_library("user-A", "DMA-Rb")
+    lib_2 = service.create_library("user-A", "DMA-Rb")
+
+    assert lib_1["id"] != lib_2["id"]
+    assert lib_1["slug"] == lib_2["slug"]  # same name -> same slug, by construction
+
+    key_1 = service._storage_key(lib_1)
+    key_2 = service._storage_key(lib_2)
+    assert key_1 != key_2
+
+    from app.tools.phase_mapper_paths import library_root
+    root_1 = library_root("user-A", key_1)
+    root_2 = library_root("user-A", key_2)
+    assert root_1 != root_2
+
+
+def test_delete_library_removes_on_disk_tree(service, monkeypatch, tmp_path):
+    monkeypatch.setattr("app.tools.phase_mapper_paths.get_user_data_dir", lambda: str(tmp_path))
+
+    library = service.create_library("user-A", "Lib A")
+    from app.tools.phase_mapper_paths import library_inputs_dir
+    inputs_dir = library_inputs_dir("user-A", service._storage_key(library))
+    marker = inputs_dir / "composition.csv"
+    marker.write_text("well\nA1\n")
+    assert marker.exists()
+
+    service.delete_library(library["id"], "user-A")
+
+    assert not inputs_dir.exists()
+    assert not marker.exists()

@@ -7,6 +7,7 @@ composition fractions that don't sum to ~1.
 """
 from __future__ import annotations
 
+import io
 import re
 from pathlib import Path
 
@@ -42,17 +43,21 @@ async def save_composition_csv(user_id: str, slug: str, upload: UploadFile) -> s
     # uploads, which accumulate) — always written to a fixed filename so
     # start_run (Task 6) can find it without discovering the upload's
     # original name.
+    #
+    # Validate the upload against an in-memory copy *before* touching the
+    # destination file. Writing first and validating after would destroy an
+    # existing valid composition.csv the moment a bad replacement is
+    # uploaded, leaving the library with no composition map at all.
+    content = await upload.read()
+    await upload.close()
+    df = pd.read_csv(io.BytesIO(content), nrows=1)
+    if "well" not in df.columns:
+        raise ValueError("Composition CSV is missing the required 'well' column.")
+
     dest_dir = library_inputs_dir(user_id, slug)
     dest = dest_dir / "composition.csv"
-    content = await upload.read()
     dest.write_bytes(content)
-    await upload.close()
-    path = str(dest.resolve())
-    df = pd.read_csv(path, nrows=1)
-    if "well" not in df.columns:
-        Path(path).unlink(missing_ok=True)
-        raise ValueError("Composition CSV is missing the required 'well' column.")
-    return path
+    return str(dest.resolve())
 
 
 def validate_composition_csv(path: str) -> list[str]:

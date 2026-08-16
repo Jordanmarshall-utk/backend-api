@@ -71,3 +71,4 @@ def test_upload_composition_csv(svc):
         )
     assert resp.status_code == 200
     assert resp.json()["warnings"] == []
+    assert "path" not in resp.json()

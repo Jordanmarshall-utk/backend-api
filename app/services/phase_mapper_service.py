@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -18,7 +19,13 @@ from fastapi import UploadFile
 from app.services import phase_mapper_uploads as uploads
 from app.services.phase_mapper.config import DEFAULT_CONFIG
 from app.tools.database import DatabaseManager
-from app.tools.phase_mapper_paths import library_inputs_dir, library_uploads_dir, new_run_dir, slugify
+from app.tools.phase_mapper_paths import (
+    library_inputs_dir,
+    library_root,
+    library_uploads_dir,
+    new_run_dir,
+    slugify,
+)
 
 _UPLOAD_KIND_MAP = {
     "composition": uploads.save_composition_csv,
@@ -46,15 +53,29 @@ class PhaseMapperService:
             raise LookupError(f"Library {library_id} not found for this user")
         return library
 
+    @staticmethod
+    def _storage_key(library: dict[str, Any]) -> str:
+        """On-disk storage key for a library.
+
+        Incorporates the numeric library id (not just the name-derived slug)
+        so that two libraries with the same human-readable name — which slug
+        to the same string — never resolve to the same directory tree on
+        disk. Every call site that derives a library's on-disk location must
+        go through this helper.
+        """
+        return f"{library['id']}-{library['slug']}"
+
     def delete_library(self, library_id: int, user_id: str) -> None:
-        self.get_library_owned(library_id, user_id)
+        library = self.get_library_owned(library_id, user_id)
         self.db.delete_phase_mapper_library(library_id)
+        root = library_root(library["user_id"], self._storage_key(library))
+        shutil.rmtree(root, ignore_errors=True)
 
     async def save_upload(self, library_id: int, user_id: str, kind: str, upload: UploadFile) -> dict[str, Any]:
         library = self.get_library_owned(library_id, user_id)
         if kind not in _UPLOAD_KIND_MAP:
             raise ValueError(f"Unknown upload kind: {kind}")
-        path = await _UPLOAD_KIND_MAP[kind](user_id, library["slug"], upload)
+        path = await _UPLOAD_KIND_MAP[kind](user_id, self._storage_key(library), upload)
         warnings = uploads.validate_composition_csv(path) if kind == "composition" else []
         return {"path": path, "warnings": warnings}
 
@@ -63,14 +84,21 @@ class PhaseMapperService:
         if self.db.has_active_phase_mapper_run(library_id):
             raise RuntimeError("A run is already in progress for this library")
 
-        run_dir = new_run_dir(user_id, library["slug"])
+        storage_key = self._storage_key(library)
+        run_dir = new_run_dir(user_id, storage_key)
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        composition_path = library_inputs_dir(user_id, library["slug"]) / "composition.csv"
+        composition_path = library_inputs_dir(user_id, storage_key) / "composition.csv"
         cfg = copy.deepcopy(DEFAULT_CONFIG)
         cfg["paths"]["output_dir"] = str(run_dir)
         cfg["paths"]["composition_map"] = str(composition_path)
-        plate_dir = library_uploads_dir(user_id, library["slug"], "plate_reader")
+        # NOTE: composition_profile (stored at library-creation time) and the
+        # raw_xrd / xrd_labels_reviewed upload kinds are accepted through the
+        # API today but not yet wired into the pipeline's config here — full
+        # wiring is deferred to the follow-up plan that adds the remaining
+        # result tabs. This is an intentional, documented gap.
+        cfg["experiment"] = {"library_name": library["name"]}
+        plate_dir = library_uploads_dir(user_id, storage_key, "plate_reader")
         cfg["paths"]["plate_reader_files"] = [str(p) for p in sorted(plate_dir.glob("*")) if p.is_file()]
 
         run_id = self.db.create_phase_mapper_run(library_id, str(run_dir))
@@ -109,6 +137,13 @@ class PhaseMapperService:
                 )
                 run = self.db.get_phase_mapper_run(run_id)
         return run
+
+    def delete_run(self, run_id: int, user_id: str) -> None:
+        run = self.db.get_phase_mapper_run(run_id)
+        if run is None:
+            raise LookupError(f"Run {run_id} not found")
+        self.get_library_owned(run["library_id"], user_id)  # raises LookupError if not owned
+        self.db.delete_phase_mapper_run(run_id)
 
     def get_reads(self, run_id: int, user_id: str) -> list[dict[str, Any]]:
         run = self.db.get_phase_mapper_run(run_id)

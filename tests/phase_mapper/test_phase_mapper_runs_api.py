@@ -64,3 +64,30 @@ def test_get_run_not_found(svc):
     with patch.object(pm_module, "get_service", return_value=svc):
         resp = client.get("/phase-mapper/runs/999")
     assert resp.status_code == 404
+
+
+def test_get_run_response_omits_dir_path(svc):
+    app, client = _client(svc)
+    import app.api.v1.phase_mapper as pm_module
+    with patch.object(pm_module, "get_service", return_value=svc):
+        resp = client.get("/phase-mapper/runs/10")
+    assert resp.status_code == 200
+    assert "dir_path" not in resp.json()
+
+
+def test_delete_run(svc):
+    app, client = _client(svc)
+    import app.api.v1.phase_mapper as pm_module
+    with patch.object(pm_module, "get_service", return_value=svc):
+        resp = client.delete("/phase-mapper/runs/10")
+    assert resp.status_code == 200
+    svc.delete_run.assert_called_once_with(10, "user-1")
+
+
+def test_delete_run_not_found_for_non_owned_run(svc):
+    svc.delete_run.side_effect = LookupError("not found")
+    app, client = _client(svc)
+    import app.api.v1.phase_mapper as pm_module
+    with patch.object(pm_module, "get_service", return_value=svc):
+        resp = client.delete("/phase-mapper/runs/999")
+    assert resp.status_code == 404

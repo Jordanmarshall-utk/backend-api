@@ -39,6 +39,20 @@ def test_validate_composition_csv_warns_without_failing(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_save_composition_csv_rejects_bad_replacement_without_destroying_existing_good_file(tmp_path):
+    good_bytes = b"well,row,col\nA1,A,1\n"
+    await uploads.save_composition_csv("user-1", "lib-a", _upload("composition.csv", good_bytes))
+
+    bad_bytes = b"row,col\nA,1\n"
+    with pytest.raises(ValueError, match="well"):
+        await uploads.save_composition_csv("user-1", "lib-a", _upload("bad.csv", bad_bytes))
+
+    from app.tools.phase_mapper_paths import library_inputs_dir
+    dest = library_inputs_dir("user-1", "lib-a") / "composition.csv"
+    assert dest.read_bytes() == good_bytes
+
+
+@pytest.mark.asyncio
 async def test_save_plate_reader_file(tmp_path):
     path = await uploads.save_plate_reader_file("user-1", "lib-a", _upload("plate.xlsx", b"binary-stub"))
     assert path.endswith("plate.xlsx")

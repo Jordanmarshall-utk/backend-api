@@ -33,7 +33,6 @@ class LibraryResponse(BaseModel):
 
 
 class UploadResponse(BaseModel):
-    path: str
     warnings: list[str]
 
 
@@ -102,7 +101,6 @@ class RunResponse(BaseModel):
     id: int
     library_id: int
     status: str
-    dir_path: str
     job_pid: int | None
     return_code: int | None
     error_message: str
@@ -135,6 +133,19 @@ def get_run(
         return svc.get_run(run_id, user.id)
     except LookupError:
         raise HTTPException(status_code=404, detail="Run not found")
+
+
+@router.delete("/phase-mapper/runs/{run_id}")
+def delete_run(
+    run_id: int,
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> dict:
+    svc = get_service()
+    try:
+        svc.delete_run(run_id, user.id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"status": "deleted"}
 
 
 @router.get("/phase-mapper/runs/{run_id}/reads")
