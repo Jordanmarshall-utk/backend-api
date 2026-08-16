@@ -91,6 +91,41 @@ def test_full_library_pipeline_round_trip_over_http(client):
     assert len(reads) >= 1
     assert reads[0]["read_type"] == "absorbance"
 
+    resp = client.get(f"/phase-mapper/runs/{run['id']}/predictions")
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+    resp = client.get(f"/phase-mapper/runs/{run['id']}/xrd-recommendations")
+    assert resp.status_code == 200
+
+    resp = client.get(f"/phase-mapper/runs/{run['id']}/remeasurement")
+    assert resp.status_code == 200
+
+    resp = client.get(f"/phase-mapper/runs/{run['id']}/optical-spectra")
+    assert resp.status_code == 200
+    assert len(resp.json()) > 0
+    resp = client.get(f"/phase-mapper/runs/{run['id']}/optical-spectra?well=A1")
+    assert resp.status_code == 200
+    assert all(row["well"] == "A1" for row in resp.json())
+
+    resp = client.get(f"/phase-mapper/runs/{run['id']}/heatmaps")
+    assert resp.status_code == 200
+    heatmaps_body = resp.json()
+    assert "Cs_fraction" in heatmaps_body["columns"]
+    assert any(w["well"] == "A1" for w in heatmaps_body["wells"])
+
+    resp = client.get(f"/phase-mapper/libraries/{library['id']}/runs")
+    assert resp.status_code == 200
+    assert any(r["id"] == run["id"] for r in resp.json())
+
+    resp = client.get(f"/phase-mapper/runs/{run['id']}/download")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        assert "parsed_reads_summary.csv" in zf.namelist()
+
     # Finding 5: frozen sample_key must be keyed off the real library name
     # ("Fixture Library::A1"), not the literal placeholder string "library".
     db = DatabaseManager()
