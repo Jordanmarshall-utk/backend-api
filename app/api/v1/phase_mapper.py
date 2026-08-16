@@ -123,6 +123,18 @@ def start_run(
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@router.get("/phase-mapper/libraries/{library_id}/runs", response_model=list[RunResponse])
+def list_runs(
+    library_id: int,
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> list[dict]:
+    svc = get_service()
+    try:
+        return svc.list_runs(library_id, user.id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Library not found")
+
+
 @router.get("/phase-mapper/runs/{run_id}", response_model=RunResponse)
 def get_run(
     run_id: int,

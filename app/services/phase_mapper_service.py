@@ -47,6 +47,10 @@ class PhaseMapperService:
     def list_libraries(self, user_id: str) -> list[dict[str, Any]]:
         return self.db.list_phase_mapper_libraries(user_id)
 
+    def list_runs(self, library_id: int, user_id: str) -> list[dict[str, Any]]:
+        self.get_library_owned(library_id, user_id)
+        return self.db.list_phase_mapper_runs(library_id)
+
     def get_library_owned(self, library_id: int, user_id: str) -> dict[str, Any]:
         library = self.db.get_phase_mapper_library(library_id)
         if library is None or library["user_id"] != user_id:

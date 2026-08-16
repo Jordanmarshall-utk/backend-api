@@ -383,3 +383,18 @@ def test_get_heatmaps_renames_colliding_columns_instead_of_dropping_data(service
     # rather than being silently overwritten or dropped.
     assert a1["priority_optical_remeasurement"] == 0.1
     assert a2["priority_optical_remeasurement"] == 0.8
+
+
+def test_list_runs_returns_all_runs_for_owning_user(db, service):
+    library_id = db.create_phase_mapper_library("user-A", "Lib A", "lib-a")
+    first = db.create_phase_mapper_run(library_id, "/data/lib-a/runs/1")
+    db.update_phase_mapper_run(first, status="succeeded")
+    second = db.create_phase_mapper_run(library_id, "/data/lib-a/runs/2")
+    runs = service.list_runs(library_id, "user-A")
+    assert [r["id"] for r in runs] == [second, first]
+
+
+def test_list_runs_raises_for_different_user(db, service):
+    library_id = db.create_phase_mapper_library("user-A", "Lib A", "lib-a")
+    with pytest.raises(LookupError):
+        service.list_runs(library_id, "user-B")
