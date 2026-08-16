@@ -12,7 +12,9 @@ a real DB dict — with real objects on both sides. The pipeline subprocess
 still actually executes; only the entry point changes from direct Python
 calls to HTTP requests against the app.
 """
+import io
 import time
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -94,12 +96,21 @@ def test_full_library_pipeline_round_trip_over_http(client):
     resp = client.get(f"/phase-mapper/runs/{run['id']}/predictions")
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+    assert len(resp.json()) > 0
 
     resp = client.get(f"/phase-mapper/runs/{run['id']}/xrd-recommendations")
     assert resp.status_code == 200
+    xrd_recs = resp.json()
+    assert isinstance(xrd_recs, list)
+    if xrd_recs:
+        assert "well" in xrd_recs[0]
 
     resp = client.get(f"/phase-mapper/runs/{run['id']}/remeasurement")
     assert resp.status_code == 200
+    remeasurement = resp.json()
+    assert isinstance(remeasurement, list)
+    if remeasurement:
+        assert "well" in remeasurement[0]
 
     resp = client.get(f"/phase-mapper/runs/{run['id']}/optical-spectra")
     assert resp.status_code == 200
@@ -121,8 +132,6 @@ def test_full_library_pipeline_round_trip_over_http(client):
     resp = client.get(f"/phase-mapper/runs/{run['id']}/download")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
-    import io
-    import zipfile
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         assert "parsed_reads_summary.csv" in zf.namelist()
 
