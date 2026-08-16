@@ -179,6 +179,13 @@ class PhaseMapperService:
         run = self._get_owned_run(run_id, user_id)
         return self._read_csv_records(run["dir_path"], "optical_remeasurement_recommendations.csv")
 
+    def get_optical_spectra(self, run_id: int, user_id: str, well: str | None = None) -> list[dict[str, Any]]:
+        run = self._get_owned_run(run_id, user_id)
+        records = self._read_csv_records(run["dir_path"], "spectral_data_long_format.csv")
+        if well:
+            records = [r for r in records if r.get("well") == well]
+        return records
+
 
 def _pid_exists(pid: int) -> bool:
     try:

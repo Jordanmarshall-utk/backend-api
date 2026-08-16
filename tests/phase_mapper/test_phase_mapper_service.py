@@ -267,3 +267,32 @@ def test_get_remeasurement_raises_for_different_user(service, db, tmp_path):
 def test_get_remeasurement_returns_empty_list_when_csv_absent(service, db, tmp_path):
     run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
     assert service.get_remeasurement(run_id, "user-A") == []
+
+
+def test_get_optical_spectra_returns_all_rows_by_default(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "spectral_data_long_format.csv").write_text(
+        "well,wavelength_nm,signal\nA1,500,1.0\nA2,500,1.1\n", encoding="utf-8"
+    )
+    records = service.get_optical_spectra(run_id, "user-A")
+    assert len(records) == 2
+
+
+def test_get_optical_spectra_filters_by_well(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "spectral_data_long_format.csv").write_text(
+        "well,wavelength_nm,signal\nA1,500,1.0\nA2,500,1.1\n", encoding="utf-8"
+    )
+    records = service.get_optical_spectra(run_id, "user-A", well="A1")
+    assert records == [{"well": "A1", "wavelength_nm": 500, "signal": 1.0}]
+
+
+def test_get_optical_spectra_raises_for_different_user(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    with pytest.raises(LookupError):
+        service.get_optical_spectra(run_id, "user-B")
+
+
+def test_get_optical_spectra_returns_empty_list_when_csv_absent(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    assert service.get_optical_spectra(run_id, "user-A") == []
