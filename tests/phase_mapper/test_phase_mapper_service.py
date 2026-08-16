@@ -309,6 +309,11 @@ def test_get_heatmaps_merges_available_files(service, db, tmp_path):
     result = service.get_heatmaps(run_id, "user-A")
     assert "pl_peak_nm" in result["columns"]
     assert "Cs_fraction" in result["columns"]
+    # row/col/well are identifiers, not metrics: present on each well record
+    # but must never appear in the `columns` list the frontend iterates over.
+    assert "well" not in result["columns"]
+    assert "row" not in result["columns"]
+    assert "col" not in result["columns"]
     a1 = next(w for w in result["wells"] if w["well"] == "A1")
     assert a1["row"] == "A"
     assert a1["col"] == 1
@@ -325,3 +330,56 @@ def test_get_heatmaps_returns_empty_when_no_files_present(service, db, tmp_path)
     run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
     result = service.get_heatmaps(run_id, "user-A")
     assert result == {"columns": [], "wells": []}
+
+
+def test_get_heatmaps_excludes_non_numeric_column_from_columns_but_keeps_value(service, db, tmp_path):
+    # A text column (not one of the hardcoded identifier names) must survive
+    # the merge on each well record, but must be excluded from `columns`
+    # because it fails the numeric-dtype check, not because it's on the
+    # hardcoded non_metric_cols list.
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "composition_descriptors_per_well.csv").write_text(
+        "well,row,col,Cs_fraction\nA1,A,1,0.5\n", encoding="utf-8"
+    )
+    (run_dir / "model_predictions_all_wells.csv").write_text(
+        "well,phase_label,pred_prob\nA1,perovskite,0.84\n", encoding="utf-8"
+    )
+
+    result = service.get_heatmaps(run_id, "user-A")
+
+    assert "phase_label" not in result["columns"]
+    assert "pred_prob" in result["columns"]
+    a1 = next(w for w in result["wells"] if w["well"] == "A1")
+    assert a1["phase_label"] == "perovskite"
+
+
+def test_get_heatmaps_renames_colliding_columns_instead_of_dropping_data(service, db, tmp_path):
+    # xrd_recommendations_next_wells.csv and optical_remeasurement_recommendations.csv
+    # both define a "priority" column with unrelated meanings/values. The old
+    # merge silently dropped the second file's column entirely; the fix must
+    # keep both under distinct, non-colliding keys.
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "composition_descriptors_per_well.csv").write_text(
+        "well,row,col,Cs_fraction\nA1,A,1,0.5\nA2,A,2,0.7\n", encoding="utf-8"
+    )
+    (run_dir / "xrd_recommendations_next_wells.csv").write_text(
+        "well,priority\nA1,0.9\nA2,0.3\n", encoding="utf-8"
+    )
+    (run_dir / "optical_remeasurement_recommendations.csv").write_text(
+        "well,priority\nA1,0.1\nA2,0.8\n", encoding="utf-8"
+    )
+
+    result = service.get_heatmaps(run_id, "user-A")
+
+    assert "priority" in result["columns"]
+    assert "priority_optical_remeasurement" in result["columns"]
+
+    a1 = next(w for w in result["wells"] if w["well"] == "A1")
+    a2 = next(w for w in result["wells"] if w["well"] == "A2")
+    # Values from the earlier-merged file (xrd) keep the clean, unprefixed name.
+    assert a1["priority"] == 0.9
+    assert a2["priority"] == 0.3
+    # The later, colliding file's values survive under the disambiguated name
+    # rather than being silently overwritten or dropped.
+    assert a1["priority_optical_remeasurement"] == 0.1
+    assert a2["priority_optical_remeasurement"] == 0.8

@@ -194,6 +194,28 @@ class PhaseMapperService:
         "optical_remeasurement_recommendations.csv",
     ]
 
+    # Trailing tokens stripped from a source filename's stem to produce a
+    # short, human-readable disambiguation tag (see _heatmap_source_tag).
+    # Only the first matching suffix is stripped, so e.g.
+    # "xrd_recommendations_next_wells" -> "xrd_recommendations" (keeps
+    # "recommendations" so it stays distinct from
+    # "optical_remeasurement_recommendations" -> "optical_remeasurement").
+    _HEATMAP_TAG_SUFFIXES = ("_per_well", "_all_wells", "_next_wells", "_recommendations")
+
+    @classmethod
+    def _heatmap_source_tag(cls, filename: str) -> str:
+        """Deterministic, human-readable short tag derived from a source filename.
+
+        Used to disambiguate columns that collide across two heatmap source
+        files (same column name, different meaning) without dropping either
+        one's data.
+        """
+        stem = filename.removesuffix(".csv")
+        for suffix in cls._HEATMAP_TAG_SUFFIXES:
+            if stem.endswith(suffix):
+                return stem[: -len(suffix)]
+        return stem
+
     def get_heatmaps(self, run_id: int, user_id: str) -> dict[str, Any]:
         run = self._get_owned_run(run_id, user_id)
         run_dir = run["dir_path"]
@@ -208,8 +230,18 @@ class PhaseMapperService:
             if not path.exists():
                 continue
             other = pd.read_csv(path)
-            overlap = [c for c in other.columns if c in merged.columns and c != "well"]
-            other = other.drop(columns=overlap)
+            tag = self._heatmap_source_tag(filename)
+            rename_map = {}
+            for c in other.columns:
+                if c == "well" or c not in merged.columns:
+                    continue
+                new_name = f"{c}_{tag}"
+                # Guard against the (unlikely) case where the disambiguated
+                # name itself already exists, so no column is ever dropped.
+                while new_name in merged.columns or new_name in rename_map.values():
+                    new_name = f"{new_name}_2"
+                rename_map[c] = new_name
+            other = other.rename(columns=rename_map)
             merged = merged.merge(other, on="well", how="left")
 
         non_metric_cols = {"well", "row", "col", "library", "sample_key", "is_control", "replicate_group", "notes"}
