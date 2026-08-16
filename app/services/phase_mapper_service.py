@@ -94,15 +94,16 @@ class PhaseMapperService:
             raise LookupError(f"Run {run_id} not found")
         self.get_library_owned(run["library_id"], user_id)  # raises LookupError if not owned
 
-        if run["status"] == "running" and run["job_pid"] and not _pid_exists(run["job_pid"]):
+        if run["status"] == "running":
             returncode_path = Path(run["dir_path"]) / f"{run_id}.returncode"
-            return_code = int(returncode_path.read_text()) if returncode_path.exists() else None
-            status = "succeeded" if return_code == 0 else "failed"
-            self.db.update_phase_mapper_run(
-                run_id, status=status, return_code=return_code,
-                frozen=(status == "succeeded"), completed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            )
-            run = self.db.get_phase_mapper_run(run_id)
+            if returncode_path.exists():
+                return_code = int(returncode_path.read_text())
+                status = "succeeded" if return_code == 0 else "failed"
+                self.db.update_phase_mapper_run(
+                    run_id, status=status, return_code=return_code,
+                    frozen=(status == "succeeded"), completed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+                run = self.db.get_phase_mapper_run(run_id)
         return run
 
 

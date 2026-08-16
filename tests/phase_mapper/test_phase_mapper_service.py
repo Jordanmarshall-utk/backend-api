@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 
 from app.services.phase_mapper_service import PhaseMapperService  # noqa: E402
@@ -45,3 +46,46 @@ def test_get_library_owned_raises_for_different_user(service, db):
 def test_get_library_owned_raises_for_nonexistent_library(service):
     with pytest.raises(LookupError):
         service.get_library_owned(999999, "user-A")
+
+
+def _make_running_run(db, tmp_path, *, job_pid: int) -> tuple[int, "os.PathLike"]:
+    library_id = db.create_phase_mapper_library("user-A", "Lib A", "lib-a")
+    run_dir = tmp_path / "run-dir"
+    run_dir.mkdir()
+    run_id = db.create_phase_mapper_run(library_id, str(run_dir))
+    db.update_phase_mapper_run(run_id, job_pid=job_pid)
+    return run_id, run_dir
+
+
+def test_get_run_transitions_to_succeeded_when_returncode_file_exists(service, db, tmp_path):
+    # Use our own PID: it is guaranteed to be alive (not a "not _pid_exists" case),
+    # proving completion detection no longer depends on the job PID having exited.
+    run_id, run_dir = _make_running_run(db, tmp_path, job_pid=os.getpid())
+    (run_dir / f"{run_id}.returncode").write_text("0")
+
+    run = service.get_run(run_id, "user-A")
+
+    assert run["status"] == "succeeded"
+    assert run["return_code"] == 0
+    assert run["frozen"]
+    assert run["completed_at"] is not None
+
+
+def test_get_run_transitions_to_failed_when_returncode_file_is_nonzero(service, db, tmp_path):
+    run_id, run_dir = _make_running_run(db, tmp_path, job_pid=os.getpid())
+    (run_dir / f"{run_id}.returncode").write_text("1")
+
+    run = service.get_run(run_id, "user-A")
+
+    assert run["status"] == "failed"
+    assert run["return_code"] == 1
+    assert not run["frozen"]
+
+
+def test_get_run_stays_running_when_returncode_file_absent(service, db, tmp_path):
+    # Even with a still-alive PID and no returncode file yet, status must remain "running".
+    run_id, run_dir = _make_running_run(db, tmp_path, job_pid=os.getpid())
+
+    run = service.get_run(run_id, "user-A")
+
+    assert run["status"] == "running"
