@@ -167,6 +167,10 @@ class PhaseMapperService:
         run = self._get_owned_run(run_id, user_id)
         return self._read_csv_records(run["dir_path"], "parsed_reads_summary.csv")
 
+    def get_predictions(self, run_id: int, user_id: str) -> list[dict[str, Any]]:
+        run = self._get_owned_run(run_id, user_id)
+        return self._read_csv_records(run["dir_path"], "model_predictions_all_wells.csv")
+
 
 def _pid_exists(pid: int) -> bool:
     try:

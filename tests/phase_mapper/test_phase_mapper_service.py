@@ -198,3 +198,26 @@ def test_delete_library_removes_on_disk_tree(service, monkeypatch, tmp_path):
 
     assert not inputs_dir.exists()
     assert not marker.exists()
+
+
+def test_get_predictions_returns_csv_records_for_owning_user(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "model_predictions_all_wells.csv").write_text(
+        "well,pred_xrd_clean_3d_perovskite_prob\nA1,0.84\nA2,0.12\n", encoding="utf-8"
+    )
+    records = service.get_predictions(run_id, "user-A")
+    assert records == [
+        {"well": "A1", "pred_xrd_clean_3d_perovskite_prob": 0.84},
+        {"well": "A2", "pred_xrd_clean_3d_perovskite_prob": 0.12},
+    ]
+
+
+def test_get_predictions_raises_for_different_user(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    with pytest.raises(LookupError):
+        service.get_predictions(run_id, "user-B")
+
+
+def test_get_predictions_returns_empty_list_when_csv_absent(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    assert service.get_predictions(run_id, "user-A") == []
