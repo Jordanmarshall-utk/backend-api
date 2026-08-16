@@ -244,3 +244,26 @@ def test_get_xrd_recommendations_raises_for_different_user(service, db, tmp_path
 def test_get_xrd_recommendations_returns_empty_list_when_csv_absent(service, db, tmp_path):
     run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
     assert service.get_xrd_recommendations(run_id, "user-A") == []
+
+
+def test_get_remeasurement_returns_csv_records_for_owning_user(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "optical_remeasurement_recommendations.csv").write_text(
+        "well,optical_remeasurement_priority_score\nB3,0.55\nB4,0.42\n", encoding="utf-8"
+    )
+    records = service.get_remeasurement(run_id, "user-A")
+    assert records == [
+        {"well": "B3", "optical_remeasurement_priority_score": 0.55},
+        {"well": "B4", "optical_remeasurement_priority_score": 0.42},
+    ]
+
+
+def test_get_remeasurement_raises_for_different_user(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    with pytest.raises(LookupError):
+        service.get_remeasurement(run_id, "user-B")
+
+
+def test_get_remeasurement_returns_empty_list_when_csv_absent(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    assert service.get_remeasurement(run_id, "user-A") == []

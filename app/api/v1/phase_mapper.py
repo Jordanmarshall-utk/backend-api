@@ -182,3 +182,15 @@ def get_xrd_recommendations(
         return svc.get_xrd_recommendations(run_id, user.id)
     except LookupError:
         raise HTTPException(status_code=404, detail="Run not found")
+
+
+@router.get("/phase-mapper/runs/{run_id}/remeasurement")
+def get_remeasurement(
+    run_id: int,
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> list[dict]:
+    svc = get_service()
+    try:
+        return svc.get_remeasurement(run_id, user.id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Run not found")
