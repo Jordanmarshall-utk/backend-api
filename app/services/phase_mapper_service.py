@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from fastapi import UploadFile
 
 from app.services import phase_mapper_uploads as uploads
@@ -105,6 +107,18 @@ class PhaseMapperService:
                 )
                 run = self.db.get_phase_mapper_run(run_id)
         return run
+
+    def get_reads(self, run_id: int, user_id: str) -> list[dict[str, Any]]:
+        run = self.db.get_phase_mapper_run(run_id)
+        if run is None:
+            raise LookupError(f"Run {run_id} not found")
+        self.get_library_owned(run["library_id"], user_id)
+
+        csv_path = Path(run["dir_path"]) / "parsed_reads_summary.csv"
+        if not csv_path.exists():
+            return []
+        df = pd.read_csv(csv_path)
+        return json.loads(df.to_json(orient="records"))
 
 
 def _pid_exists(pid: int) -> bool:
