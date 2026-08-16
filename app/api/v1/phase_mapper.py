@@ -207,3 +207,15 @@ def get_optical_spectra(
         return svc.get_optical_spectra(run_id, user.id, well)
     except LookupError:
         raise HTTPException(status_code=404, detail="Run not found")
+
+
+@router.get("/phase-mapper/runs/{run_id}/heatmaps")
+def get_heatmaps(
+    run_id: int,
+    user: Annotated[AuthUser, Depends(get_current_user)],
+) -> dict:
+    svc = get_service()
+    try:
+        return svc.get_heatmaps(run_id, user.id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Run not found")

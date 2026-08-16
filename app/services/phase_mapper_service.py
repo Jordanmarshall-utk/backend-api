@@ -186,6 +186,40 @@ class PhaseMapperService:
             records = [r for r in records if r.get("well") == well]
         return records
 
+    _HEATMAP_SOURCE_FILES = [
+        "composition_descriptors_per_well.csv",
+        "optical_features_per_well.csv",
+        "model_predictions_all_wells.csv",
+        "xrd_recommendations_next_wells.csv",
+        "optical_remeasurement_recommendations.csv",
+    ]
+
+    def get_heatmaps(self, run_id: int, user_id: str) -> dict[str, Any]:
+        run = self._get_owned_run(run_id, user_id)
+        run_dir = run["dir_path"]
+
+        base_path = Path(run_dir) / self._HEATMAP_SOURCE_FILES[0]
+        if not base_path.exists():
+            return {"columns": [], "wells": []}
+        merged = pd.read_csv(base_path)
+
+        for filename in self._HEATMAP_SOURCE_FILES[1:]:
+            path = Path(run_dir) / filename
+            if not path.exists():
+                continue
+            other = pd.read_csv(path)
+            overlap = [c for c in other.columns if c in merged.columns and c != "well"]
+            other = other.drop(columns=overlap)
+            merged = merged.merge(other, on="well", how="left")
+
+        non_metric_cols = {"well", "row", "col", "library", "sample_key", "is_control", "replicate_group", "notes"}
+        numeric_cols = [
+            c for c in merged.columns
+            if c not in non_metric_cols and pd.api.types.is_numeric_dtype(merged[c])
+        ]
+        records = json.loads(merged.to_json(orient="records"))
+        return {"columns": numeric_cols, "wells": records}
+
 
 def _pid_exists(pid: int) -> bool:
     try:

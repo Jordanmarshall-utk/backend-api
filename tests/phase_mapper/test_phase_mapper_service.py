@@ -296,3 +296,32 @@ def test_get_optical_spectra_raises_for_different_user(service, db, tmp_path):
 def test_get_optical_spectra_returns_empty_list_when_csv_absent(service, db, tmp_path):
     run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
     assert service.get_optical_spectra(run_id, "user-A") == []
+
+
+def test_get_heatmaps_merges_available_files(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    (run_dir / "composition_descriptors_per_well.csv").write_text(
+        "well,row,col,Cs_fraction\nA1,A,1,0.5\nA2,A,2,0.7\n", encoding="utf-8"
+    )
+    (run_dir / "optical_features_per_well.csv").write_text(
+        "well,pl_peak_nm\nA1,512.3\nA2,498.1\n", encoding="utf-8"
+    )
+    result = service.get_heatmaps(run_id, "user-A")
+    assert "pl_peak_nm" in result["columns"]
+    assert "Cs_fraction" in result["columns"]
+    a1 = next(w for w in result["wells"] if w["well"] == "A1")
+    assert a1["row"] == "A"
+    assert a1["col"] == 1
+    assert a1["pl_peak_nm"] == 512.3
+
+
+def test_get_heatmaps_raises_for_different_user(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    with pytest.raises(LookupError):
+        service.get_heatmaps(run_id, "user-B")
+
+
+def test_get_heatmaps_returns_empty_when_no_files_present(service, db, tmp_path):
+    run_id, run_dir = _make_run_with_dir(db, tmp_path, user_id="user-A")
+    result = service.get_heatmaps(run_id, "user-A")
+    assert result == {"columns": [], "wells": []}
