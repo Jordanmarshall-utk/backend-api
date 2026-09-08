@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     literature_mcp_endpoint: str = "http://127.0.0.1:8000/mcp"
     watcher_port: int = 8765
 
+    smtp_host: str = "smtp.mail.me.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    feedback_to_email: str = ""
+
     @property
     def cors_origin_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

@@ -6,6 +6,7 @@ from app.api.v1 import (
     dashboard,
     documents,
     experiments,
+    feedback,
     health,
     history,
     literature,
@@ -38,3 +39,4 @@ api_router.include_router(history.router, tags=["history"])
 api_router.include_router(pipeline.router, tags=["pipeline"])
 api_router.include_router(literature.router, tags=["literature"])
 api_router.include_router(phase_mapper.router, tags=["phase-mapper"])
+api_router.include_router(feedback.router, tags=["feedback"])
