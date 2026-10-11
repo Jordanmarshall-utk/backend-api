@@ -54,7 +54,6 @@ class WatcherAgent(BaseAgent):
         if params.get("source") != "filesystem":
             return 0.0
         
-        # Simple heuristic-based confidence (no LLM required)
         trigger_file = params.get("trigger_file", "") or params.get("data_file", "")
         event_type = params.get("event", "created")
         

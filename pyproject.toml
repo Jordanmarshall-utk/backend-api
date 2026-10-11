@@ -54,6 +54,8 @@ dependencies = [
   "langgraph>=0.2.0",
   "langgraph-checkpoint-sqlite>=1.0.0",
   "langgraph-checkpoint-postgres>=2.0.0",
+  "mcp>=1.27,<2",
+  "crewai==1.15.17",
 ]
 
 [project.optional-dependencies]

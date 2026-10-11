@@ -18,7 +18,10 @@ from app.services.experiment_defaults import (
     merge_constraints,
 )
 from app.services.llm_runtime import require_api_key
+from app.services.reasoning_integration import reasoning_context_for_stage
+from app.services.experiment_validation import experiment_automation_blockers
 from app.tools import socratic
+from app.tools.opentrons_draft import validate_opentrons_draft
 
 
 def _manual_inputs(memory: Any) -> Dict[str, str]:
@@ -215,8 +218,38 @@ def generate_gp_worklist(memory: Any, *, upload_to_jupyter: bool = False) -> Dic
     return result
 
 
-def run_experiment_pipeline(memory: Any) -> Dict[str, Any]:
+def _experiment_automation_blockers(
+    constraints: Dict[str, Any],
+    plan: str,
+) -> List[str]:
+    return experiment_automation_blockers(constraints, plan)
+
+
+def _blocked_experiment_draft(objective: str, blockers: List[str]) -> str:
+    missing = "\n".join(f"- {item}" for item in blockers)
+    return (
+        "## Research objective\n\n"
+        f"{str(objective or 'Define a testable experimental objective.').strip()}\n\n"
+        "## Planning status\n\n"
+        "The scientific concept remains open for experimental design, but POLARIS cannot produce "
+        "a trustworthy executable protocol from the current constraints. Proposed materials, "
+        "volumes, equipment, well assignments, measurements, and directional outcomes are withheld "
+        "until they can be defined without invention.\n\n"
+        "## Required inputs\n\n"
+        f"{missing}\n\n"
+        "## Protocol\n\nWithheld until the release gate passes.\n\n"
+        "## Worklist\n\nWithheld until the release gate passes.\n\n"
+        "## Decision criteria\n\nSupport and refutation criteria will be generated only after "
+        "the configured measurements can distinguish the proposed mechanism from alternatives."
+    )
+
+
+def run_experiment_pipeline(
+    memory: Any,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Full Streamlit run_agent flow without UI."""
+    payload = dict(payload or {})
     require_api_key(memory)
 
     readiness = _readiness(memory)
@@ -261,6 +294,18 @@ def run_experiment_pipeline(memory: Any) -> Dict[str, Any]:
         hypothesis = str(memory.get_var("manual_hypothesis"))
 
     experimental_context = agent.get_experimental_context()
+    reasoning_context = (
+        str(payload.get("reasoning_context") or "")
+        if "reasoning_context" in payload
+        else reasoning_context_for_stage(memory, "experiment")
+    )
+    if reasoning_context:
+        experimental_context = (
+            f"{experimental_context}\n\n{reasoning_context}\n"
+            "Use this guidance to choose discriminating tests and falsifiers. Do not override "
+            "explicit equipment, safety, plate, material, or liquid-handling constraints. Do not "
+            "mention the council, philosophy schools, or internal reasoning instructions in the plan."
+        )
     plans = socratic.tot_generation_experimental_plan(socratic_q, clarified, experimental_context)
     if not plans:
         return {
@@ -274,18 +319,94 @@ def run_experiment_pipeline(memory: Any) -> Dict[str, Any]:
 
     lh = constraints["liquid_handling"]
     plate_format = lh["plate_format"]
-    materials = lh["materials"] or ["Cs", "BDA"]
+    materials = list(lh["materials"] or [])
+    blockers = _experiment_automation_blockers(constraints, str(plan))
+    if blockers:
+        raw_plan = str(plan)
+        plan = _blocked_experiment_draft(clarified, blockers)
+        memory.set_var(
+            "experiment_plan_audit",
+            {
+                "status": "blocked",
+                "blockers": blockers,
+                "rejected_plan_preview": raw_plan[:2000],
+            },
+        )
+        outputs = {
+            "plan": plan,
+            "worklist": "",
+            "layout": "",
+            "protocol": None,
+            "automation_ready": False,
+            "automation_blockers": blockers,
+        }
+        memory.set_var("experimental_outputs", outputs)
+        protocol_md = f"## Experimental planning draft\n\n{plan}"
+        doc = export_agent_document(
+            title="Experimental Planning Draft",
+            markdown_body=protocol_md,
+            agent="experiment",
+            memory=memory,
+        )
+        memory.log_event(
+            "experiment_automation_blocked",
+            {"blockers": blockers, "rejected_plan": raw_plan[:500]},
+            "experiment",
+        )
+        return {
+            "status": "success",
+            "message": "Experimental plan drafted; automation withheld until required constraints pass the release gate.",
+            "readiness": readiness,
+            "experimental_plan_preview": str(plan)[:1500],
+            "protocol_markdown": protocol_md,
+            "worklist_csv": "",
+            "plate_layout": "",
+            "opentrons_protocol": None,
+            "plate_format": plate_format,
+            "materials": materials,
+            "automation_ready": False,
+            "automation_blockers": blockers,
+            "document_id": doc["document_id"],
+            "document_markdown": doc["markdown"],
+            "pdf_url": doc["pdf_url"],
+            "has_experimental_plan": True,
+        }
+
     csv_materials = [m if str(m).endswith("_uL") else f"{m}_uL" for m in materials]
 
     worklist = agent.generate_worklist(plan, plate_format, csv_materials)
     layout = agent.generate_plate_layout(plan, plate_format, worklist)
     protocol = None
+    protocol_validation = None
     if any("Opentrons" in str(i) for i in lh.get("instruments") or []):
         protocol = agent.generate_opentrons_protocol("worklist.csv", csv_materials, lh.get("csv_path") or "")
+        protocol_validation = validate_opentrons_draft(protocol, worklist).as_dict()
+
+    automation_blockers = []
+    if protocol:
+        if protocol_validation and protocol_validation.get("errors"):
+            automation_blockers.extend(protocol_validation["errors"])
+        if not protocol_validation or protocol_validation.get("simulation_status") != "passed":
+            automation_blockers.append("Run the draft through the official Opentrons simulator.")
+        automation_blockers.append("Obtain explicit human approval on the laboratory-side connector.")
+    draft_status = (
+        str(protocol_validation.get("status"))
+        if protocol_validation
+        else "not_requested"
+    )
 
     memory.set_var(
         "experimental_outputs",
-        {"plan": plan, "worklist": worklist, "layout": layout, "protocol": protocol},
+        {
+            "plan": plan,
+            "worklist": worklist,
+            "layout": layout,
+            "protocol": protocol,
+            "protocol_status": draft_status,
+            "protocol_validation": protocol_validation,
+            "automation_ready": False,
+            "automation_blockers": list(dict.fromkeys(automation_blockers)),
+        },
     )
 
     protocol_md = _protocol_markdown(plan, worklist, layout, protocol)
@@ -319,13 +440,23 @@ def run_experiment_pipeline(memory: Any) -> Dict[str, Any]:
 
     memory.log_event(
         "experiment_complete",
-        {"plan": str(plan)[:500], "plate_format": plate_format, "materials": materials},
+        {
+            "plan": str(plan)[:500],
+            "plate_format": plate_format,
+            "materials": materials,
+            "protocol_status": draft_status,
+            "automation_ready": False,
+        },
         "experiment",
     )
 
     return {
         "status": "success",
-        "message": "Experimental protocol generated (plan, worklist, plate layout).",
+        "message": (
+            "Experimental plan, worklist, plate layout, and an unexecuted Opentrons draft were generated."
+            if protocol
+            else "Experimental plan, worklist, and plate layout were generated."
+        ),
         "readiness": readiness,
         "experimental_plan_preview": str(plan)[:1500],
         "protocol_markdown": protocol_md,
@@ -334,6 +465,10 @@ def run_experiment_pipeline(memory: Any) -> Dict[str, Any]:
         "opentrons_protocol": protocol,
         "plate_format": plate_format,
         "materials": materials,
+        "protocol_status": draft_status,
+        "protocol_validation": protocol_validation,
+        "automation_ready": False,
+        "automation_blockers": list(dict.fromkeys(automation_blockers)),
         "document_id": doc["document_id"],
         "document_markdown": doc["markdown"],
         "pdf_url": doc["pdf_url"],

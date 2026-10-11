@@ -146,9 +146,105 @@ def workflow_stop(
     return stop_workflow(_memory(experiment_id, user))
 
 
+def _prime_demo_tour_state(memory) -> None:
+    steps = [
+        {
+            "name": "Hypothesis Agent",
+            "automatic": False,
+            "description": "Refine the research question with literature evidence and council guidance.",
+        },
+        {
+            "name": "Experiment Agent",
+            "automatic": False,
+            "description": "Generate a constrained protocol, composition series, and plate layout.",
+        },
+        {
+            "name": "Curve Fitting",
+            "automatic": True,
+            "description": "Resolve composition-dependent photoluminescence phase peaks.",
+        },
+        {
+            "name": "ML Models",
+            "automatic": True,
+            "description": "Rank the next compositions using prediction uncertainty.",
+        },
+        {
+            "name": "Analysis Agent",
+            "automatic": True,
+            "description": "Compare evidence, fitted results, and model suggestions.",
+        },
+    ]
+    memory.set_var("current_workflow_name", "Phase-aware PL optimization")
+    memory.set_var("workflow_name", "Phase-aware PL optimization")
+    memory.set_var("workflow_steps", steps)
+    memory.set_var("manual_workflow", [step["name"] for step in steps])
+    memory.set_var("workflow_auto_flags", {step["name"]: step["automatic"] for step in steps})
+    memory.set_var("workflow_active", True)
+    memory.set_var("workflow_index", 0)
+    memory.set_var("workflow_step", "hypothesis")
+    memory.set_var("demo_workflow_running", True)
+    memory.set_var("auto_run_curve_fitting", False)
+    memory.set_var("auto_run_data_file", None)
+    memory.set_var("auto_run_comp_file", None)
+    memory.set_var("auto_run_params", {})
+    memory.set_var("auto_ml_after_curve_fitting", True)
+    memory.set_var("auto_route_to_analysis", True)
+    memory.set_var(
+        "agent_usage_counts",
+        {
+            "hypothesis": 1,
+            "experiment": 1,
+            "curve_fit": 1,
+            "ml_models": 1,
+            "analysis": 1,
+            "router": 5,
+        },
+    )
+    memory.set_var("reasoning_mode", "Active")
+    memory.set_var(
+        "last_reasoning_plan",
+        {
+            "primary_school": "humean",
+            "supporting_schools": ["cartesian", "hegelian"],
+            "assignments": {
+                "humean": "Ground phase assignments and composition trends in the measured spectra.",
+                "cartesian": "Separate composition, phase identity, peak fitting, and uncertainty checks.",
+                "hegelian": "Reconcile competing phase emissions without forcing a monotonic peak shift.",
+            },
+            "rationale": (
+                "Evidence grounding leads the analysis, decomposition keeps fitted quantities distinct, "
+                "and conflict resolution handles coexistence between lower-dimensional and 3D phases."
+            ),
+            "confidence": 0.88,
+            "reasoning_required": True,
+            "task_summary": (
+                "Assess how the PEA2PbI4 to FAPbI3 composition changes phase-resolved PL emission "
+                "and identify informative next experiments."
+            ),
+            "reasoning_sequence": ["humean", "cartesian", "hegelian"],
+            "unresolved_questions": [
+                "Which emission bands represent coexisting phases rather than a continuous wavelength shift?",
+                "Which compositions most reduce uncertainty around the dominant-phase transition?",
+            ],
+            "evidence_requirements": [
+                "Composition-resolved PL spectra",
+                "Multi-peak fit quality and uncertainty",
+                "Replicate measurements near phase-transition compositions",
+            ],
+            "warnings": [],
+            "mode": "Active",
+            "selection_source": "crewai",
+            "crew_success": True,
+            "fallback_used": False,
+            "error": None,
+        },
+    )
+
+
 class WorkflowDemoRequest(BaseModel):
     experiment_id: Optional[int] = None
     auto_fit: bool = True
+    precomputed: bool = False
 
 
 @router.post("/workflows/demo")
@@ -156,7 +252,28 @@ def workflow_demo(
     user: Annotated[AuthUser, Depends(get_current_user)],
     body: WorkflowDemoRequest = WorkflowDemoRequest(),
 ) -> dict:
-    return run_demo_workflow(_memory(body.experiment_id, user), auto_fit=body.auto_fit)
+    memory = _memory(body.experiment_id, user)
+    if body.precomputed:
+        from app.services.presentation_demo_service import load_presentation_demo
+
+        result = load_presentation_demo(memory)
+    else:
+        result = run_demo_workflow(memory, auto_fit=body.auto_fit)
+    _prime_demo_tour_state(memory)
+    if body.precomputed:
+        # Bind the report after every presentation-state mutation so Analysis
+        # cannot mistake it for output from an older hypothesis.
+        from app.services.analysis_service import _hypothesis_fingerprint, _hypothesis_text
+
+        memory.set_var(
+            "research_goal",
+            "Evaluate composition-dependent 2D, quasi-2D, and 3D emission features and recommend the next measurements.",
+        )
+        memory.set_var(
+            "analysis_hypothesis_fingerprint",
+            _hypothesis_fingerprint(_hypothesis_text(memory)),
+        )
+    return result
 
 
 @router.get("/workflows/export")

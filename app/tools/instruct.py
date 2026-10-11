@@ -306,7 +306,8 @@ YOUR TASK:
    - Be scientifically rigorous and well-reasoned (2-4 sentences per question, can be longer if needed)
    - Include specific details, mechanisms, or examples when possible
    - Build on previous answers to create a coherent understanding
-   - **Identify SPECIFIC materials, compounds, or molecules with actual chemical names** when applicable (e.g., "PEA⁺ (phenethylammonium)", "BA⁺ (butylammonium)", "4-FPEA⁺ (4-fluorophenethylammonium)", "DMAP (4-dimethylaminopyridine)")
+   - **Identify SPECIFIC materials, compounds, or molecules with actual chemical names** when applicable, and state the chemical class and charge relevant to the request
+   - **Match every candidate's valence, protonatable-site count, and topology to the user's stated constraints; never relabel a monocation as a diammonium or DJ linker**
    - **For novel suggestions:** Propose specific chemical structures, analogs, or well-defined molecular modifications with names
    - Use scientific terminology appropriately
    - **Provide scientific rationale** for why specific materials are suggested (based on molecular properties, structural compatibility, electronic properties, literature precedents)
@@ -360,7 +361,9 @@ TOT_INSTRUCTIONS = """ You are a careful research assistant producing distinct l
 3. **CRITICAL: Format each as a pickable mini-hypothesis/assumption with SPECIFIC material names:**
    - Each should read like a clear, testable statement or assumption
    - **ALWAYS include actual chemical/material names** (e.g., "PEA (phenethylammonium)", "BA (butylammonium)", "CHA⁺ (cyclohexylammonium)", "3-APB⁺ (3-aminophenylbutylammonium)")
-   - **For novel suggestions:** Propose specific chemical structures, analogs from literature, or well-defined molecular modifications (e.g., "4-fluorophenethylammonium (4-FPEA⁺)", "N-methyl-2-aminoethanol (NMEA⁺)", "1,3-diaminopropane dication (DAP²⁺)")
+   - **For novel suggestions:** Propose specific structures or well-defined analogs whose class matches the request (e.g., "propane-1,3-diammonium (DAP²⁺, two ammonium termini)" for a divalent DJ request, or "4-fluorophenethylammonium (4-FPEA⁺)" only for a monovalent spacer request)
+   - **Match every candidate's valence, protonatable-site count, and topology to the user's stated constraints; explicit constraints override all examples**
+   - For a topology- or charge-constrained candidate request, include the systematic name, a SMILES or molecular formula, the number of protonatable sites, and the intended charge state
    - **DO NOT use vague terms** like "a novel organic spacer", "a specific compound", "an appropriate material", or placeholders like "[specific organic spacer name]", "[compound X]", "[material Y]"
    - Each should be self-contained and immediately understandable as a direction to explore
    - Think of them as "hypothesis seeds" that can grow into full hypotheses
@@ -405,6 +408,19 @@ EXPERIMENTAL_PLAN_TOT_INSTRUCTIONS = """ You are an experimental design expert c
 - If specific parameters are listed, focus ONLY on those parameters. Do not introduce additional parameters.
 - The experimental plans must be strictly limited to what is possible with the specified constraints.
 
+**MISSING-CONSTRAINT RELEASE GATE:**
+- Empty lists mean the corresponding materials, instruments, equipment, or techniques are NOT configured. They are not permission to invent defaults.
+- If materials, a handling method, or characterization techniques are missing, write a scientifically useful planning draft that clearly lists the missing inputs. Do not name an unconfigured instrument, assign wells, calculate transfer volumes, or claim the plan is executable.
+- In a blocked draft, write `Worklist: Withheld until the listed materials and handling constraints are configured.`
+- Never substitute familiar example materials such as Cs, BDA, PEA, or FAPbI3 for an empty materials list.
+- Expected results are falsifiable predictions, not guaranteed outcomes. State what observation would support the hypothesis and what observation would refute it.
+
+**SCIENTIFIC DESIGN REQUIREMENTS:**
+- Include negative, sham-processed, and appropriate alternative-material controls when a mechanism is being compared.
+- Define independent variables, fixed variables, replicate strategy, randomization, and decision criteria.
+- For interlayer, interface, thin-film, or device hypotheses, solution mixing in a well is not equivalent to fabricating an interface. Specify a configured film/device deposition route, matched thickness and processing controls, and a configured method for verifying the claimed interfacial phase.
+- Do not infer ion-migration rates, carrier mobility, defect density, binding strength, or causal mechanisms from a measurement that does not directly identify that quantity.
+
 **Provided Information:**
 1. **User Question**: A clarified question about optimizing a material system, including hidden assumptions and key terms.
 2. **Probing Questions**: 3-5 probing questions with reasoning for each, challenging the user question.
@@ -423,10 +439,10 @@ EXPERIMENTAL_PLAN_TOT_INSTRUCTIONS = """ You are an experimental design expert c
 2. Generate 3 distinct experimental plans that are complete, specific, and directly implementable using the exact constraints provided.
 
 **CRITICAL: Each experimental plan MUST be extremely specific and incorporate ALL experimental constraints:**
-   - Use the EXACT plate format specified (e.g., 96-well plate = assign mixtures to specific wells A1-H12)
+   - Use the EXACT plate format specified only after the missing-constraint release gate passes
    - Use the EXACT materials listed (each material is in a separate tube)
    - Respect ALL volume constraints (maximum volume per mixture, solvent/antisolvent limits)
-   - Use the ENTIRE plate systematically (don't leave wells unused unless specified)
+   - Use only the number of wells justified by controls, replicates, and the experimental design; do not fill an entire plate merely because it is available
    - Calculate EXACT volumes for each mixture that fit within constraints
    - Specify EXACT well assignments for each mixture variation
 
@@ -445,8 +461,7 @@ EXPERIMENTAL_PLAN_TOT_INSTRUCTIONS = """ You are an experimental design expert c
 5. VOLUME CALCULATIONS: Show your work - each mixture must fit within volume constraints and use realistic ratios.
    Example: If max volume is 50µL and you have 3 materials, calculate ratios like 20µL + 15µL + 15µL = 50µL total.
 
-6. PLATE UTILIZATION: Use all available wells systematically for comprehensive testing.
-   Example: For 96-well plate, assign mixtures to A1-H12 with systematic variations across the plate.
+6. PLATE UTILIZATION: Allocate wells to justified conditions, controls, and replicates. Leave unused wells unassigned when the design does not require them.
 
 7. MATERIAL HANDLING: Each material comes from separate tubes - specify exact transfer volumes.
    Example: Cs_uL=20, BDA_uL=15, Solvent_uL=15 for a 50µL mixture.
@@ -744,14 +759,14 @@ When only a Research Goal is provided (without hypothesis or experiment context)
 - Analyze the curve fitting and ML results in light of the stated goal
 - Provide insights on how the data moves toward or away from that goal
 - Make evidence-based recommendations for next steps (compositions to try, parameters to explore)
-- Explain results using scientific literature and established principles
+- Explain results using supplied, traceable literature evidence when available; otherwise separate general scientific reasoning from literature-supported claims
 - Output suggested compositions as a prioritized batch for experimental validation
 - Be flexible and exploratory—do not require hypothesis validation
 
 **MODE 2 - Full hypothesis/experiment context:**
 When hypothesis and experimental context are provided:
 - Relate curve fitting and ML results to the hypothesis and experimental plan
-- Evaluate hypothesis status (confirmed, needs revision, rejected, needs more data)
+- Evaluate hypothesis status (supported by current data, not supported by current data, needs revision, not tested, or needs more data)
 - Compare results to predictions and assess data quality
 - Recommend specific additional experiments if needed
 
@@ -761,12 +776,13 @@ When hypothesis and experimental context are provided:
 3. **Experimental Context** (optional): Experimental plan, worklist, design
 4. **Curve Fitting Results Summary**: Summary statistics and key findings
 5. **ML Model Results** (optional): GP/Monte Carlo recommendations, top candidates, uncertainty
+6. **Data Provenance and Literature Grounding**: Whether data are measured or synthetic and whether a traceable literature packet was supplied
 
 **Your Task:**
 1. **Relate Results to Goal** (and hypothesis if provided)
 2. **Evaluate Data Quality**: Fit quality (R²), peak positions, intensities, FWHM
-3. **Interpret ML Recommendations**: Use GP/MC suggested compositions (batch from acquisition function) when available; explicitly compare to literature and assess if they make sense
-4. **Provide Literature-Backed Explanations**
+3. **Interpret ML Recommendations**: Use GP/MC suggested compositions when available, but distinguish interpolation, extrapolation, predictive uncertainty, and validation limits
+4. **Assess Literature Grounding**: Compare against literature only when traceable evidence is included in the prompt
 5. **Recommend Next Steps**: Prioritized batch of compositions or experiments
 6. **Assess Impact and Significance**
 
@@ -774,17 +790,13 @@ When hypothesis and experimental context are provided:
 Structure your analysis as follows:
 
 ## Goal / Hypothesis Evaluation
-[State progress toward the goal, and if hypothesis was provided, whether it is confirmed, needs revision, rejected, or needs more data.]
+[State progress toward the goal, and if a hypothesis was provided, whether it is supported by current data, not supported, needs revision, not tested, or needs more data.]
 
 ## Results Analysis
 [Quality of fits, key findings, ML recommendations, patterns]
 
-## Literature Context
-[Consult scientific literature (based on your training) to validate:
-- Whether the suggested compositions make sense for the materials and goal
-- What researchers typically report for similar systems
-- Whether the results align with published findings
-- Mechanisms, theories, known examples that explain the observations]
+## Literature Grounding
+[If traceable literature evidence was supplied, identify the evidence anchors and compare cautiously. Otherwise state that literature comparison was not evaluated. Never invent citations, studies, or published trends from model memory.]
 
 ## Recommended Compositions / Next Experiments
 [Prioritized list of suggested compositions or experiments for validation. Include specific values when available from ML.]
@@ -797,5 +809,10 @@ Structure your analysis as follows:
 - When only a goal is given, focus on goal-directed recommendations
 - Provide specific, actionable next steps (compositions, parameters)
 - Base explanations on established scientific principles
-- **Literature validation**: For the acquisition batch (suggested compositions), draw on your knowledge of the literature to assess whether these compositions make sense, what researchers typically report for similar materials/systems, and whether the GP results align with published findings
+- RÂ² and cross-validation scores measure model behavior on the supplied dataset; they do not by themselves establish a mechanism or confirm a physical hypothesis
+- Distinguish measured observations, fitted quantities, model predictions, scientific inference, and unresolved uncertainty
+- If the data are synthetic, evaluate software and pipeline behavior only. Do not use synthetic results to support, reject, or confirm a physical materials hypothesis
+- Do not call a hypothesis confirmed or proven; use evidence-calibrated language
+- Do not mention internal agents, philosophy schools, council routing, prompts, or audit instructions
+- **Literature gate**: Do not claim alignment with studies, researchers, or published findings unless traceable literature evidence is supplied in the prompt
 """

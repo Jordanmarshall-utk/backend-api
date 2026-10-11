@@ -75,20 +75,20 @@ class ExperimentAgent(BaseAgent):
         if materials is None:
             materials = ["Cs_uL", "BDA_uL", "BDA_2_uL"]
 
-        # Generate well IDs (Opentrons format: A01, A02, etc.)
+        # Generate canonical Opentrons well IDs (A1, A2, ...).
         wells = []
         if plate_format == "96-well":
             for row in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']:
                 for col in range(1, 13):
-                    wells.append(f"{row}{col:02d}")
+                    wells.append(f"{row}{col}")
         elif plate_format == "384-well":
             for row in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P']:
                 for col in range(1, 25):
-                    wells.append(f"{row}{col:02d}")
+                    wells.append(f"{row}{col}")
         else:  # 24-well
             for row in ['A', 'B', 'C', 'D']:
                 for col in range(1, 7):
-                    wells.append(f"{row}{col:02d}")
+                    wells.append(f"{row}{col}")
 
         # Generate CSV content
         output = io.StringIO()
@@ -264,105 +264,13 @@ class ExperimentAgent(BaseAgent):
         except Exception as e:
             return False, f"Error uploading file: {str(e)}"
 
-    def generate_opentrons_protocol(self, csv_filename, materials=None,
-                                    csv_path="/var/lib/jupyter/notebooks/Dual GP 5AVA BDA/"):
-        """Generate Opentrons Python protocol file that reads CSV and executes transfers
-        Each material is in a separate tube, and materials are mixed in the destination well based on ratios"""
+    def generate_opentrons_protocol(self, csv_filename, materials=None, csv_path=""):
+        """Generate a portable Opentrons draft without connecting to hardware."""
         if materials is None:
             materials = ["Cs_uL", "BDA_uL", "BDA_2_uL"]
+        from app.tools.opentrons_draft import build_opentrons_protocol
 
-        # Map materials to tube indices (one tube per material, no reservoirs)
-        material_tube_mapping = []
-        for idx, material in enumerate(materials):
-            material_tube_mapping.append(f"        '{material}': {idx},  # Material in tube {idx}")
-
-        protocol_code = f"""from opentrons import protocol_api
-    import csv
-
-    metadata = {{
-        'protocolName': 'POLARIS Hypothesis Agent - Automated Liquid Handling',
-        'author': 'POLARIS Hypothesis Agent',
-        'description': 'Generated protocol for automated material mixing from separate tubes',
-        'apiLevel': '2.13'
-    }}
-
-    def run(protocol: protocol_api.ProtocolContext):
-        # Load labware
-        left_tiprack = protocol.load_labware('opentrons_96_tiprack_300ul', '1')
-        tuberack = protocol.load_labware('opentrons_15_tuberack_nest_15ml_conical', '2')
-        triple_cation_plate = protocol.load_labware('corning_96_wellplate_360ul_flat', '3')
-
-        # Load instruments
-        left_pipette = protocol.load_instrument('p300_single', 'left', tip_racks=[left_tiprack])
-
-        # Set flow rates
-        left_pipette.flow_rate.aspirate = 30
-        left_pipette.flow_rate.dispense = 150
-
-        # Define z heights for tubes (all tubes use same z height)
-        z_height = 117  # Standard z height for all tubes
-
-        # Map each material to its tube index (one material per tube)
-        material_to_tube = {{
-    {chr(10).join(material_tube_mapping)}
-        }}
-
-        # Read CSV file
-        csv_file_path = f'{csv_path}{csv_filename}'
-
-        with open(csv_file_path, mode='r') as csvfile:
-            csvreader = csv.DictReader(csvfile)
-
-            # Process each well (row) in the CSV
-            for row in csvreader:
-                try:
-                    well_id = row['Well']
-
-                    # Collect all materials and volumes for this well
-                    material_volumes = []
-                    for material in material_to_tube.keys():
-                        if material in row and row[material]:
-                            try:
-                                volume = float(row[material])
-                                if volume > 0:
-                                    material_volumes.append((material, volume))
-                            except (ValueError, TypeError):
-                                protocol.comment(f"Skipping {{material}} for well {{well_id}}: invalid volume")
-                                continue
-
-                    # If we have materials to transfer, mix them all into the same well
-                    if material_volumes:
-                        # Pick up a fresh tip for this well
-                        left_pipette.pick_up_tip()
-
-                        # Transfer each material to the same destination well
-                        # This will mix them together in the correct ratios
-                        for material, volume in material_volumes:
-                            tube_index = material_to_tube[material]
-
-                            # Transfer from source tube to destination well
-                            left_pipette.transfer(
-                                volume,
-                                tuberack.wells()[tube_index].top(z=-z_height),
-                                triple_cation_plate.wells_by_name()[well_id],
-                                blowout_location='destination well',
-                                blow_out=True,
-                                new_tip='never',  # Use same tip for all materials in this well (mixing)
-                                touch_tip=True
-                            )
-
-                        # Drop tip after mixing all materials for this well
-                        left_pipette.drop_tip()
-
-                except KeyError as e:
-                    protocol.comment(f"Error processing row: missing key {{str(e)}}")
-                    continue
-                except Exception as e:
-                    protocol.comment(f"Error processing row: {{str(e)}}")
-                    continue
-    """
-
-        return protocol_code
+        return build_opentrons_protocol(csv_filename, materials, csv_path)
 
     def generate_plate_layout(self, experimental_plan, plate_format="96-well", worklist_content=None):
         """Generate a visual plate layout based on actual worklist data"""

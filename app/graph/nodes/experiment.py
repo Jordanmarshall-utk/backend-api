@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import logging
-
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langchain_core.runnables import RunnableConfig
 
 from app.graph.state import PolarisGraphState
-from app.llm.chains.experiment import plan_tot_chain
 from app.services.experiment_service import run_experiment_pipeline
 from app.services.memory_service import get_memory_manager
+from app.services.reasoning_integration import reasoning_context_for_stage
 from app.tools.memory_adapter import MemoryAdapter
 
 
@@ -25,23 +23,23 @@ async def _build_context_node(state: PolarisGraphState, config: RunnableConfig) 
 
 async def _generate_plan_node(state: PolarisGraphState, config: RunnableConfig) -> PolarisGraphState:
     memory = get_memory_manager()
-    clarified_question = state.get("research_goal") or memory.get_var("research_goal") or ""
-    constraints = memory.get_var("experimental_constraints") or "No specific constraints provided."
-    try:
-        plan = await plan_tot_chain.ainvoke({
-            "clarified_question": clarified_question,
-            "experimental_constraints": constraints,
-        })
-        return MemoryAdapter.write(memory, state, experimental_plan=plan)
-    except Exception as exc:
-        logging.getLogger(__name__).warning("Plan generation chain failed: %s", exc)
-        return {**state}
+    return MemoryAdapter.write(
+        memory,
+        state,
+        experimental_plan=memory.get_var("experimental_plan"),
+    )
 
 
 async def _generate_worklist_node(state: PolarisGraphState, config: RunnableConfig) -> PolarisGraphState:
     memory = get_memory_manager()
     # Delegate full pipeline execution to the existing service
-    result = run_experiment_pipeline(memory)
+    result = run_experiment_pipeline(
+        memory,
+        {
+            "action": "run",
+            "reasoning_context": reasoning_context_for_stage(memory, "experiment"),
+        },
+    )
     outputs = result if isinstance(result, dict) else {}
     return MemoryAdapter.write(
         memory, state,

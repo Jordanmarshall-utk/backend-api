@@ -6,9 +6,6 @@ import json
 from typing import Any, Dict, Generator, Iterator, List, Optional
 
 from app.services.hypothesis_chat import (
-    _choose_hypothesis_next_step,
-    _choose_refine_option,
-    _hypothesis_document_fields,
     _insert_handoff_bubble,
     _literature_handoff_bubble,
     choose_option,
@@ -16,16 +13,17 @@ from app.services.hypothesis_chat import (
     reset_session,
 )
 from app.services.hypothesis_messages import (
-    build_hypothesis_result_bubbles,
     build_submit_bubbles,
     join_bubbles_for_legacy,
 )
 from app.services.hypothesis_perf import (
     fast_submit_enabled,
-    skip_analysis_on_generate,
     skip_socratic_answers,
 )
 from app.services.llm_runtime import require_api_key
+from app.services.reasoning_integration import (
+    plan_hypothesis_reasoning,
+)
 from app.tools import socratic
 
 
@@ -53,7 +51,25 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
         raise ValueError("Question is required.")
 
     policy = reasoning_policy or "auto"
-    memory.set_var("reasoning_policy", policy)
+    yield _progress(
+        "reasoning_council",
+        [],
+        label="Consulting the POLARIS Reasoning Council...",
+    )
+    decision = plan_hypothesis_reasoning(
+        memory,
+        q,
+        "hypothesis_generation",
+        requested_policy=policy,
+    )
+    policy = decision.effective_policy
+    yield _progress(
+        "reasoning_council",
+        [],
+        label=f"Reasoning plan: {decision.plan.primary_school}",
+        reasoning_policy=policy,
+        reasoning_plan=decision.plan.model_dump(mode="json"),
+    )
 
     clarified = socratic.clarify_question(q, reasoning_policy=policy)
     if not clarified or not str(clarified).strip():
@@ -129,6 +145,10 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
     while len(thoughts) < 3:
         thoughts.append(f"Option {len(thoughts) + 1}: Continue exploring")
 
+    handoff_bubble = _literature_handoff_bubble(memory)
+    if handoff_bubble:
+        yield _progress("literature_handoff", [handoff_bubble])
+
     thought_bubbles = []
     for i, thought in enumerate(thoughts[:3], 1):
         if thought and str(thought).strip():
@@ -137,10 +157,6 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
             )
     if thought_bubbles:
         yield _progress("thoughts", thought_bubbles)
-
-    handoff_bubble = _literature_handoff_bubble()
-    if handoff_bubble:
-        yield _progress("literature_handoff", [handoff_bubble])
 
     memory.insert_interaction("user", q, "initial_question", "hypothesis")
     memory.insert_interaction("assistant", clarified, "clarified_question", "hypothesis")
@@ -170,107 +186,26 @@ def iter_submit_question(memory: Any, question: str, reasoning_policy: str = "au
             "messages": bubbles,
             "assistant_message": join_bubbles_for_legacy(bubbles),
             "options": thoughts[:3],
+            "reasoning_plan": decision.plan.model_dump(mode="json"),
         }
     )
 
 
 def iter_generate_hypothesis(memory: Any) -> Iterator[Dict[str, Any]]:
-    yield _progress("synthesize", [], label="Synthesizing hypothesis…")
-    if skip_analysis_on_generate():
-        result = generate_hypothesis(memory)
-        for b in result.get("messages") or []:
-            if b.get("title") == "Hypothesis":
-                yield _progress("hypothesis", [b])
-        yield _complete(result)
-        return
-
-    # Stream synthesis then analysis by running steps manually
-    from app.services.hypothesis_chat import _agent, _full_context, _next_step_options
-    from app.services.hypothesis_perf import run_in_background
-    from app.tools.mcp_orchestrator_bridge import sync_hypothesis_proposal
-
-    require_api_key(memory)
-    agent = _agent(memory)
-    opt1, opt2, opt3 = _next_step_options(memory)
-    soc_q = (
-        memory.view_component("retry_thinking_question")
-        or memory.view_component("socratic_pass")
-        or memory.view_component("clarified_question")
-        or "How can we continue exploring this hypothesis?"
-    )
-    selected = (
-        memory.view_component("last_selected_option")
-        or opt1
-        or memory.view_component("first_thought_1")
-        or "Selected option"
-    )
-    prev1 = (
-        memory.view_component("last_prev1")
-        or opt2
-        or memory.view_component("second_thought_1")
-        or "Previous option 1"
-    )
-    prev2 = (
-        memory.view_component("last_prev2")
-        or opt3
-        or memory.view_component("third_thought_1")
-        or "Previous option 2"
-    )
-    if not soc_q or not selected:
-        raise ValueError(
-            "Insufficient context to generate hypothesis. Complete at least one exploration step first."
-        )
-
-    reasoning_policy = str(memory.get_var("reasoning_policy") or "auto")
-
-    context = _full_context(agent)
-    hypothesis = socratic.hypothesis_synthesis(soc_q, selected, prev1, prev2, context, reasoning_policy=reasoning_policy)
-    if hypothesis is None or not str(hypothesis).strip():
-        raise ValueError("Error generating hypothesis. Check your API key in Settings.")
-
-    hyp_bubble = {"role": "assistant", "title": "Hypothesis", "content": str(hypothesis).strip()}
-    yield _progress("hypothesis", [hyp_bubble])
-
-    yield _progress("analysis", [], label="Generating analysis report…")
-    socratic_question_for_analysis = (
-        memory.view_component("retry_thinking_question")
-        or memory.view_component("socratic_pass")
-        or soc_q
-    )
-    analysis_rubric = socratic.local_hypothesis_analysis_fallback(
-        hypothesis, socratic_question_for_analysis
-    )
-
-    memory.insert_interaction("assistant", hypothesis, "hypothesis", "hypothesis")
-    if analysis_rubric and str(analysis_rubric).strip():
-        memory.insert_interaction("assistant", analysis_rubric, "analysis_rubric", "hypothesis")
-        yield _progress(
-            "analysis",
-            [{"role": "assistant", "title": "Analysis report", "content": str(analysis_rubric).strip()}],
-        )
-
-    memory.set_var("last_hypothesis", hypothesis)
-    run_in_background(
-        lambda: sync_hypothesis_proposal(memory, hypothesis, source="hypothesis_agent_api"),
-        label="sync-hypothesis-proposal",
-    )
-    memory.set_var("hypothesis_ready", True)
-    memory.set_var("stop_hypothesis", False)
-    memory.set_var("stage", "analysis")
-
-    bubbles = build_hypothesis_result_bubbles(
-        str(hypothesis),
-        str(analysis_rubric) if analysis_rubric else None,
-    )
-    yield _complete(
-        {
-            "stage": "analysis",
-            "messages": bubbles,
-            "assistant_message": join_bubbles_for_legacy(bubbles),
-            "options": [],
-            **_hypothesis_document_fields(memory, str(hypothesis), analysis_rubric),
-        }
-    )
+    # Keep streaming and non-streaming evidence handling on one implementation.
+    yield _progress("synthesize", [], label="Synthesizing hypothesis...")
+    result = generate_hypothesis(memory)
+    for bubble in result.get("messages") or []:
+        title = str(bubble.get("title") or "").lower()
+        if "literatureagent" in title:
+            step = "literature_handoff"
+        elif "analysis" in title:
+            step = "analysis"
+        else:
+            step = "hypothesis"
+        yield _progress(step, [bubble])
+    yield _complete(result)
+    return
 
 
 def iter_handle_chat_stream(
@@ -298,12 +233,7 @@ def iter_handle_chat_stream(
         stage = memory.get_var("stage")
         label = "Generating continuation options…" if stage == "hypothesis" else "Deepening selected path…"
         yield _progress("choose", [], label=label)
-        if stage == "refine":
-            result = _choose_refine_option(memory, choice)
-        elif stage == "hypothesis":
-            result = _choose_hypothesis_next_step(memory, choice)
-        else:
-            result = choose_option(memory, choice)
+        result = choose_option(memory, choice)
         yield _complete(result)
         return
     raise ValueError(f"Unknown action: {action}")
@@ -327,6 +257,7 @@ def iter_sse_events(
                         "messages": event.get("messages", []),
                         "label": event.get("label"),
                         "reasoning_policy": event.get("reasoning_policy"),
+                        "reasoning_plan": event.get("reasoning_plan"),
                     },
                 )
             elif event.get("type") == "complete":

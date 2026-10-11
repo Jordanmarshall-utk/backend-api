@@ -15,6 +15,9 @@ uvicorn app.main:app --reload --port 8080
 
 Health: `GET http://localhost:8080/api/v1/health`
 
+The opt-in, read-only Streamable HTTP MCP gateway is documented in
+**[docs/MCP.md](./docs/MCP.md)**. It is disabled by default.
+
 ### Deploy to Railway (production API)
 
 See **[docs/DEPLOY-RAILWAY.md](./docs/DEPLOY-RAILWAY.md)** for volume setup, env vars, and pointing Vercel `NEXT_PUBLIC_API_URL` at your Railway domain.

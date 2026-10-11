@@ -75,9 +75,13 @@ class CurveFittingAgent(BaseAgent):
         self.memory = MemoryManager()
         self.llm_client = None
 
-    def _get_llm_client(self, min_delay_seconds: Optional[float] = None) -> LLMClient:
-        """Initialize or return cached LLM client."""
-        import os
+    def _get_llm_client(
+        self,
+        min_delay_seconds: Optional[float] = None,
+        *,
+        required: bool = False,
+    ) -> Optional[LLMClient]:
+        """Return the configured advisory LLM, or ``None`` for deterministic fitting."""
         import logging
         logger = logging.getLogger(__name__)
         
@@ -86,36 +90,37 @@ class CurveFittingAgent(BaseAgent):
         if delay is None:
             delay = self.memory.get_var("llm_delay_seconds", 0.5)
         
-        # API key from memory (web settings) or environment
-        api_key = None
-        if self.memory is not None:
-            api_key = self.memory.get_var("api_key")
-        
-        # Fallback to environment variables if not in session state
-        if not api_key:
-            api_key = (
-                os.getenv("HUGGINGFACE_API_KEY")
-                or os.getenv("HF_API_KEY")
-                or os.getenv("LLM_API_KEY")
-                or os.getenv("DASHSCOPE_API_KEY")
+        try:
+            from app.services.llm_runtime import get_llm_config
+
+            cfg = get_llm_config(self.memory)
+            api_key = cfg.api_key
+            if cfg.provider == "qwen" and not api_key:
+                base_url = str(cfg.qwen_base_url or "").lower()
+                if "localhost" in base_url or "127.0.0.1" in base_url:
+                    api_key = "ollama-local"
+            if not api_key:
+                raise ValueError(f"No API key configured for {cfg.provider}")
+
+            cache_key = (cfg.provider, cfg.model, cfg.qwen_base_url, float(delay or 0.0))
+            if getattr(self, "_llm_cache_key", None) != cache_key:
+                self.llm_client = LLMClient(
+                    provider=cfg.provider,
+                    model_id=cfg.model,
+                    api_key=api_key,
+                    min_delay_seconds=delay,
+                    qwen_base_url=cfg.qwen_base_url,
+                )
+                self._llm_cache_key = cache_key
+            return self.llm_client
+        except Exception as exc:
+            if required:
+                raise
+            logger.warning(
+                "Curve-fitting advisory LLM unavailable; deterministic fitting will continue: %s",
+                exc,
             )
-        
-        if not api_key:
-            raise ValueError("API key not found. Set HUGGINGFACE_API_KEY (or HF_API_KEY) or configure in Settings.")
-        
-        # Check if we need to recreate the client (if delay changed or client doesn't exist)
-        if self.llm_client is None or (hasattr(self.llm_client, 'min_delay') and self.llm_client.min_delay != delay):
-            provider = "qwen"
-            model_id = os.getenv("LLM_MODEL")
-            if not model_id:
-                model_id = "Qwen/Qwen2.5-VL-72B-Instruct"
-            self.llm_client = LLMClient(
-                provider=provider,
-                model_id=model_id,
-                api_key=api_key,
-                min_delay_seconds=delay
-            )
-        return self.llm_client
+            return None
 
     def confidence(self, params: Dict[str, Any]) -> float:
         """Return confidence score for curve fitting tasks."""
@@ -232,6 +237,7 @@ class CurveFittingAgent(BaseAgent):
                         logger.info(f"Auto-inferred wells from metadata: {len(wells_to_analyze)} wells")
                         logger.info(f"Auto-inferred wells from file metadata: {len(wells_to_analyze)} wells ({wells_to_analyze[0]}..{wells_to_analyze[-1]})")
                 api_delay = inferred_params.get("api_delay_seconds", 0.5)
+                use_llm = bool(inferred_params.get("use_llm", False))
                 
                 logger.info(f"Parameters: max_peaks={max_peaks}, r2_target={r2_target}, "
                           f"max_attempts={max_attempts}, reads={reads_to_analyze}, read_type={read_type}")
@@ -255,6 +261,7 @@ class CurveFittingAgent(BaseAgent):
                     max_attempts=max_attempts,
                     save_plots=True,
                     api_delay_seconds=api_delay,
+                    use_llm=use_llm,
                     auto_trigger=is_auto_trigger,
                 )
                 
@@ -303,7 +310,7 @@ class CurveFittingAgent(BaseAgent):
     def run_curve_fitting(
         self,
         data_csv_path: str,
-        composition_csv_path: str,
+        composition_csv_path: Optional[str],
         wells_to_analyze: Optional[List[str]] = None,
         reads_to_analyze: Optional[str] = "auto",
         read_type: str = "em_spectrum",
@@ -317,7 +324,9 @@ class CurveFittingAgent(BaseAgent):
         api_delay_seconds: Optional[float] = None,
         wells_to_ignore: Optional[List[str]] = None,
         skip_no_peaks: bool = False,  # Skip fitting if LLM detects no substantial peaks
-        auto_trigger: bool = False  # Whether this is an auto-triggered run from watcher
+        auto_trigger: bool = False,  # Whether this is an auto-triggered run from watcher
+        use_llm: bool = False,
+        output_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run complete curve fitting analysis using Spectropus methodology.
@@ -376,8 +385,13 @@ class CurveFittingAgent(BaseAgent):
                     fill_na_value=np.nan
                 )
 
-            # Get LLM client with rate limiting delay
-            llm = self._get_llm_client(min_delay_seconds=api_delay_seconds)
+            # Numerical fitting is deterministic by default.  The LLM is an
+            # optional advisory layer and never gates access to the fitter.
+            llm = (
+                self._get_llm_client(min_delay_seconds=api_delay_seconds, required=False)
+                if use_llm
+                else None
+            )
 
             # Curate dataset with read type filtering (if needed)
             # This returns the filtered reads that match the requested type
@@ -435,6 +449,9 @@ class CurveFittingAgent(BaseAgent):
 
             # Analyze each well
             all_results = []
+            plots_output_dir = (
+                os.path.join(output_dir, "plots") if output_dir else "results"
+            )
 
             for i, well_name in enumerate(wells_to_process):
                 logger.info(f"Analyzing well {well_name} ({i+1}/{len(wells_to_process)})")
@@ -449,7 +466,8 @@ class CurveFittingAgent(BaseAgent):
                         skip_no_peaks=skip_no_peaks,
                         r2_target=r2_target,
                         max_attempts=max_attempts,
-                        save_plots=save_plots
+                        save_plots=save_plots,
+                        output_dir=plots_output_dir,
                     )
 
                     if isinstance(result, list):
@@ -476,7 +494,8 @@ class CurveFittingAgent(BaseAgent):
                 # Save comprehensive JSON results
                 from app.tools.paths import get_results_dir
 
-                results_root = get_results_dir()
+                results_root = output_dir or get_results_dir()
+                os.makedirs(results_root, exist_ok=True)
                 json_filename = os.path.join(results_root, f"{base_name}_peak_fit_results.json")
                 json_file = save_all_wells_results(all_results, json_filename)
 
@@ -565,6 +584,8 @@ class CurveFittingAgent(BaseAgent):
                     "summary": {
                         "total_wells": len(all_results),
                         "successful_fits": len([r for r in all_results if r['fit_result'].success]),
+                        "review_required": len([r for r in all_results if r.get('qa', {}).get('review_required')]),
+                        "analysis_mode": "llm_advisory" if llm is not None else "deterministic",
                         "wells_analyzed": wells_to_process
                     }
                 }
@@ -737,7 +758,7 @@ class CurveFittingAgent(BaseAgent):
             )
 
             # Get LLM client
-            llm = self._get_llm_client()
+            llm = self._get_llm_client(required=False)
 
             # Run analysis
             result = run_complete_analysis(
@@ -746,7 +767,7 @@ class CurveFittingAgent(BaseAgent):
                 llm=llm,
                 reads=read or "auto",
                 max_peaks=max_peaks,
-                skip_no_peaks=skip_no_peaks,
+                skip_no_peaks=False,
                 model_kind=model_kind,
                 save_plots=True
             )

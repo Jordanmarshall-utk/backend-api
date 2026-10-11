@@ -5,7 +5,7 @@
   "version": "v21.4-polaris-live-adapter",
   "execution": {
     "mode": "durable_subprocess_jobs",
-    "job_state": "E:\\LiteratureAgent\\polaris_jobs",
+    "job_state": "runtime/literature_agent/jobs (override with LITERATURE_AGENT_JOB_DIR)",
     "stages": [
       "extract_batch",
       "vision_pass",

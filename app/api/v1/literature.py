@@ -39,7 +39,7 @@ class PaperHit(BaseModel):
     paper_slug: str
     title: str
     doi: str | None = None
-    score: int
+    score: float
     summary_excerpt: str
 
 

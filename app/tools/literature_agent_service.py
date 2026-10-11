@@ -24,8 +24,20 @@ from typing import Any
 
 try:
     from app.tools.agent_contract import AgentResult, AgentTask
+    from app.tools.hypothesis_quality import (
+        bounded_packet_text,
+        build_quality_flags,
+        prepare_retrieval_query,
+        render_evidence_contract,
+    )
 except ImportError:
     from agent_contract import AgentResult, AgentTask
+    from hypothesis_quality import (
+        bounded_packet_text,
+        build_quality_flags,
+        prepare_retrieval_query,
+        render_evidence_contract,
+    )
 
 
 STAGES = {"extract_batch", "vision_pass", "sanitize_summaries", "integrate_and_model", "knowledge_graph", "evidence_packet"}
@@ -46,6 +58,10 @@ EVIDENCE_QUERY_STOPWORDS = {
     "show", "studies", "study", "support", "test", "testing", "that", "the", "their", "type",
     "them", "there", "these", "this", "through", "under", "use", "used", "using",
     "underlying", "what", "when", "where", "whether", "which", "while", "with", "would",
+    # POLARIS provenance/boundary labels must never become scientific search terms.
+    "continuation", "current", "directly", "exploratory", "implied", "local",
+    "novel", "omitted", "packet", "proposal", "retrieved", "supplied", "supporting",
+    "underexplored", "unverified",
 }
 
 QUERY_GENERIC_TERMS = {
@@ -201,6 +217,7 @@ class LiteratureAgentService:
             query = str(request.get("query") or request.get("search_query") or "").strip()
             if not query:
                 raise ValueError("Evidence packet requires a query")
+            query = prepare_retrieval_query(query)["retrieval_query"]
             command += [
                 "--evidence_query", query,
                 "--evidence_limit", str(int(request.get("limit", 5))),
@@ -298,6 +315,7 @@ class LiteratureAgentService:
         return jobs
 
     def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        query = prepare_retrieval_query(query)["retrieval_query"]
         terms = _evidence_terms(query)
         summaries_dir = Path(self.config.work_dir) / "paper_summaries_text"
         metadata = self._record_metadata()
@@ -319,9 +337,37 @@ class LiteratureAgentService:
                         "structured_json_path": str(Path(self.config.work_dir) / "json" / f"{slug}.json"),
                     },
             })
-        ranked, _ = _rank_evidence_documents(query, documents, limit)
-        ranked_slugs = {str(item.get("paper_slug") or "") for item in ranked}
         plan = build_literature_query_plan(query, self.config.ontology_path)
+        ranked, _ = _rank_evidence_documents(query, documents, limit)
+        for item in ranked:
+            item.setdefault("retrieval_query_strategy", "exact")
+            item.setdefault("retrieval_query_used", query)
+
+        # A long request can describe ten evaluation dimensions even when a paper
+        # directly addresses its central material question. If that exact match is
+        # too sparse, run one in-memory compact variant; external retrieval remains
+        # separately bounded by the orchestrator.
+        if not any(item.get("strong_relevance_passed") for item in ranked):
+            compact_query = str(plan.get("compact_fallback_query") or "").strip()
+            if _normalize_query(compact_query) == _normalize_query(query):
+                compact_query = ""
+            if compact_query:
+                compact_ranked, _ = _rank_evidence_documents(compact_query, documents, limit)
+                if any(item.get("strong_relevance_passed") for item in compact_ranked):
+                    for item in compact_ranked:
+                        item["retrieval_query_strategy"] = "compact_fallback"
+                        item["retrieval_query_used"] = compact_query
+                    compact_slugs = {
+                        str(item.get("paper_slug") or "") for item in compact_ranked
+                    }
+                    ranked = [
+                        *compact_ranked,
+                        *[
+                            item for item in ranked
+                            if str(item.get("paper_slug") or "") not in compact_slugs
+                        ],
+                    ][:limit]
+        ranked_slugs = {str(item.get("paper_slug") or "") for item in ranked}
         contextual = []
         for document in documents:
             payload = dict(document.get("payload") or {})
@@ -358,6 +404,7 @@ class LiteratureAgentService:
         return [*ranked, *contextual][:limit]
 
     def search_relationships(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        query = prepare_retrieval_query(query)["retrieval_query"]
         path = Path(self.config.knowledge_graph_out_dir) / "derived_views" / "learned_scientific_relationships.csv"
         if not path.exists():
             return []
@@ -381,8 +428,11 @@ class LiteratureAgentService:
         return ranked
 
     def evidence_packet(self, query: str, limit: int = 5) -> dict[str, Any]:
-        papers = self.search(query, limit=limit)
-        relationships = self.search_relationships(query, limit=limit)
+        query_info = prepare_retrieval_query(query)
+        original_query = query_info["original_query"]
+        retrieval_query = query_info["retrieval_query"]
+        papers = self.search(retrieval_query, limit=limit)
+        relationships = self.search_relationships(retrieval_query, limit=limit)
         lines = ["Evidence-grounded LiteratureAgent packet:"]
         strong_evidence_count = sum(
             1 for item in papers + relationships if item.get("strong_relevance_passed")
@@ -406,7 +456,8 @@ class LiteratureAgentService:
                     f"[paper={rel.get('paper_id') or 'unknown'}, claim={rel.get('claim_id') or 'unknown'}]"
                 )
         return _enrich_evidence_packet({
-            "query": query,
+            "query": retrieval_query,
+            "original_query": original_query,
             "papers": papers,
             "relationships": relationships,
             "formatted_context": "\n".join(lines)[:16000],
@@ -417,8 +468,9 @@ class LiteratureAgentService:
                 "relationship_count": len(relationships),
                 "relevant_evidence_count": len(papers) + len(relationships),
                 "strong_evidence_count": strong_evidence_count,
+                **query_info,
             },
-        })
+        }, quality_source=original_query)
 
     def write_evidence_packet(self, query: str, limit: int = 5, max_chars: int = 16000) -> dict[str, Any]:
         """Create an auditable evidence packet with the controller when available.
@@ -426,12 +478,20 @@ class LiteratureAgentService:
         The in-process packet is still used as a fallback so hypothesis calls do
         not fail just because the standalone controller is unavailable.
         """
+        query_info = prepare_retrieval_query(query)
+        original_query = query_info["original_query"]
+        retrieval_query = query_info["retrieval_query"]
         out_dir = Path(self.config.work_dir) / "evidence_packets"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        previous_packets = {
+            str(path.resolve()): path.stat().st_mtime_ns
+            for path in out_dir.glob("*_evidence_packet.json")
+        }
         try:
             job = self.start_stage(
                 "evidence_packet",
                 {
-                    "query": query,
+                    "query": retrieval_query,
                     "limit": limit,
                     "max_chars": max_chars,
                     "evidence_out_dir": str(out_dir),
@@ -441,33 +501,52 @@ class LiteratureAgentService:
             )
             if job.get("return_code") not in {None, 0}:
                 raise RuntimeError(f"evidence_packet controller returned {job.get('return_code')}")
-            packet_path = _latest_evidence_packet(out_dir)
+            packet_path = _latest_evidence_packet(out_dir, previous_packets)
             if packet_path:
                 packet = json.loads(packet_path.read_text(encoding="utf-8"))
-                packet.setdefault("provenance", {})["controller_packet_path"] = str(packet_path)
-                packet = _enrich_evidence_packet(packet, max_chars=max_chars)
-                if not packet.get("claims"):
-                    local_packet = self.evidence_packet(query, limit=limit)
-                    if local_packet.get("claims"):
+                packet["query"] = retrieval_query
+                packet["original_query"] = original_query
+                packet.setdefault("provenance", {}).update(query_info)
+                packet["provenance"]["controller_packet_path"] = str(packet_path)
+                packet = _enrich_evidence_packet(
+                    packet, max_chars=max_chars, quality_source=original_query
+                )
+                local_packet = self.evidence_packet(original_query, limit=limit)
+                controller_direct = int(packet.get("provenance", {}).get("direct_claim_count") or 0)
+                local_direct = int(local_packet.get("provenance", {}).get("direct_claim_count") or 0)
+                controller_total = int(packet.get("provenance", {}).get("claim_count") or 0)
+                local_total = int(local_packet.get("provenance", {}).get("claim_count") or 0)
+                if local_direct > controller_direct or (
+                    local_direct == controller_direct and local_total > controller_total
+                ):
                         local_packet.setdefault("provenance", {})["controller_packet_path"] = str(packet_path)
                         local_packet["provenance"]["controller_packet_replaced_reason"] = (
-                            "Controller literal-term retrieval returned no claims; used ontology-matched local summaries."
+                            "Ontology-matched local summaries provided a stronger relevance packet."
                         )
                         packet = local_packet
                 packet_path.write_text(json.dumps(packet, indent=2, ensure_ascii=False), encoding="utf-8")
                 packet_path.with_suffix(".txt").write_text(
                     str(packet.get("formatted_context") or "").rstrip() + "\n", encoding="utf-8"
                 )
+                _persist_versioned_evidence_packet(packet, out_dir)
                 return packet
         except Exception as exc:
-            packet = self.evidence_packet(query, limit=limit)
+            packet = self.evidence_packet(original_query, limit=limit)
             packet.setdefault("provenance", {})["controller_fallback_reason"] = repr(exc)
-            packet["formatted_context"] = packet["formatted_context"][:max_chars]
+            packet["formatted_context"] = bounded_packet_text(
+                [packet.get("formatted_context") or ""], max_chars
+            )
+            _persist_versioned_evidence_packet(packet, out_dir)
             return packet
-        return self.evidence_packet(query, limit=limit)
+        packet = self.evidence_packet(original_query, limit=limit)
+        packet.setdefault("provenance", {})["controller_fallback_reason"] = (
+            "Controller completed without producing a new evidence packet."
+        )
+        _persist_versioned_evidence_packet(packet, out_dir)
+        return packet
 
     def active_retrieval_job_for_query(self, query: str) -> dict[str, Any] | None:
-        normalized = _normalize_query(query)
+        normalized = _normalize_query(prepare_retrieval_query(query)["retrieval_query"])
         for job in self.list_jobs():
             if job.stage != "extract_batch" or job.status not in {"queued", "running"}:
                 continue
@@ -478,7 +557,11 @@ class LiteratureAgentService:
     def start_hypothesis_support_retrieval(
         self, query: str, max_papers: int = 3, attempt: int = 1
     ) -> dict[str, Any]:
+        query_info = prepare_retrieval_query(query)
+        original_query = query_info["original_query"]
+        query = query_info["retrieval_query"]
         plan = build_literature_query_plan(query, self.config.ontology_path)
+        plan.update(query_info)
         variants = list(plan.get("search_variants") or [_build_external_search_query(query)])
         variant_index = min(max(1, int(attempt)) - 1, len(variants) - 1)
         search_query = variants[variant_index]
@@ -498,7 +581,7 @@ class LiteratureAgentService:
             "extract_batch",
             {
                 "search_query": search_query,
-                "source_query": query,
+                "source_query": original_query,
                 "search_plan_path": str(plan_path),
                 "retrieval_attempt": int(attempt),
                 "max_papers": max(1, min(int(max_papers), 10)),
@@ -628,11 +711,36 @@ def _file_count(path: Path) -> int:
     return sum(1 for item in path.rglob("*") if item.is_file())
 
 
-def _latest_evidence_packet(out_dir: Path) -> Path | None:
+def _latest_evidence_packet(
+    out_dir: Path, previous_packets: dict[str, int] | None = None
+) -> Path | None:
     if not out_dir.exists():
         return None
     packets = sorted(out_dir.glob("*_evidence_packet.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if previous_packets is not None:
+        changed = [
+            path for path in packets
+            if previous_packets.get(str(path.resolve())) != path.stat().st_mtime_ns
+        ]
+        return changed[0] if changed else None
     return packets[0] if packets else None
+
+
+def _persist_versioned_evidence_packet(packet: dict[str, Any], out_dir: Path) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    query = str(packet.get("query") or "hypothesis")
+    slug = "_".join(re.findall(r"[a-z0-9]+", query.lower()))[:72] or "hypothesis"
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    run_id = f"{timestamp}_{time.time_ns() % 1_000_000_000:09d}_{uuid.uuid4().hex[:6]}"
+    path = out_dir / f"{slug}_{run_id}_evidence_packet.json"
+    provenance = packet.setdefault("provenance", {})
+    provenance["packet_run_id"] = run_id
+    provenance["versioned_packet_path"] = str(path)
+    path.write_text(json.dumps(packet, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.with_suffix(".txt").write_text(
+        str(packet.get("formatted_context") or "").rstrip() + "\n", encoding="utf-8"
+    )
+    return path
 
 
 def _evidence_terms(query: str) -> list[str]:
@@ -655,6 +763,7 @@ def _normalized_phrase(value: str) -> str:
         value.replace("α", " alpha ").replace("β", " beta ").replace("γ", " gamma ")
         .replace("δ", " delta ").replace("Δ", " delta ")
     )
+    value = value.replace("\u03b8", " theta ").replace("\u00ce\u00b8", " theta ")
     value = re.sub(r"[^A-Za-z0-9+]+", " ", value.lower())
     return " ".join(value.split())
 
@@ -692,6 +801,7 @@ def build_literature_query_plan(query: str, ontology_path: str | Path) -> dict[s
     """Build a compact, auditable and domain-configurable retrieval plan."""
     query = str(query or "").strip()
     matched_groups: list[dict[str, Any]] = []
+    normalized_query = f" {_normalized_phrase(query)} "
     seen_concepts: set[str] = set()
     for group in _ontology_alias_groups(ontology_path):
         matched = [alias for alias in group["aliases"] if _phrase_present(query, alias)]
@@ -716,20 +826,45 @@ def build_literature_query_plan(query: str, ontology_path: str | Path) -> dict[s
         aliases = list(dict.fromkeys([*matched, *expanded]))[:12]
         representative = next(
             (alias for alias in matched if len(_normalized_phrase(alias)) > 3),
-            next((alias for alias in aliases if len(_normalized_phrase(alias)) > 3), group["concept"]),
+            next(
+                (
+                    alias for alias in aliases
+                    if "_" not in alias
+                    and bool(re.search(r"[ -]", alias))
+                    and not bool(re.search(r"\d", alias))
+                    and len(_normalized_phrase(alias)) > 3
+                ),
+                next(
+                    (
+                        alias for alias in aliases
+                        if "_" not in alias and len(_normalized_phrase(alias)) > 3
+                    ),
+                    group["concept"],
+                ),
+            ),
         )
+        match_positions = [
+            normalized_query.find(f" {_normalized_phrase(alias)} ")
+            for alias in matched
+            if _normalized_phrase(alias)
+        ]
         matched_groups.append({
             "concept": group["concept"],
             "aliases": aliases,
             "matched_aliases": matched,
             "representative": representative,
             "ontology_path": group["ontology_path"],
+            "match_position": min(
+                (position for position in match_positions if position >= 0),
+                default=len(normalized_query),
+            ),
         })
 
     # Prefer the most specific matched ontology concepts and remove groups whose
     # matched aliases are fully contained by a stronger group.
     matched_groups.sort(
         key=lambda group: (
+            int(group.get("match_position") or 0),
             -max((len(_normalized_phrase(alias)) for alias in group["matched_aliases"]), default=0),
             len(group.get("aliases") or []),
         ),
@@ -748,7 +883,11 @@ def build_literature_query_plan(query: str, ontology_path: str | Path) -> dict[s
     terms = [
         term for term in _evidence_terms(query)
         if term not in QUERY_GENERIC_TERMS
-        and not any(_phrase_present(alias, term) for group in required_groups for alias in group["aliases"])
+        and not any(
+            _phrase_present(alias, term)
+            for group in required_groups
+            for alias in group["matched_aliases"]
+        )
     ]
     if not required_groups:
         fallback_terms = [term for term in terms if len(term) >= 4 or any(ch.isdigit() for ch in term)][:5]
@@ -782,11 +921,14 @@ def build_literature_query_plan(query: str, ontology_path: str | Path) -> dict[s
 
     support_terms = terms[:8]
     variant_candidates = [
-        " ".join([*representatives, *support_terms[:5]]),
-        " ".join([*alternate_representatives, *support_terms[2:7]]),
-        " ".join([*representatives, *support_terms[:2]]),
+        " ".join([*representatives[:3], *support_terms[:5]]),
+        " ".join([*alternate_representatives[:3], *support_terms[2:7]]),
+        " ".join([*representatives[:2], *support_terms[:2]]),
     ]
     variants = list(dict.fromkeys(" ".join(value.split()) for value in variant_candidates if value.strip()))
+    compact_fallback_query = " ".join(
+        [*representatives[:1], *support_terms[:1]]
+    ).strip()
     min_required_groups = 1 if len(required_groups) <= 1 else 2
     return {
         "version": "polaris_query_plan_v1",
@@ -795,6 +937,7 @@ def build_literature_query_plan(query: str, ontology_path: str | Path) -> dict[s
         "minimum_required_groups": min_required_groups,
         "support_terms": support_terms,
         "search_variants": variants or [query],
+        "compact_fallback_query": compact_fallback_query or (variants[0] if variants else query),
     }
 
 
@@ -851,10 +994,22 @@ def _summary_payload_for_paper(paper: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _enrich_evidence_packet(packet: dict[str, Any], max_chars: int = 16000) -> dict[str, Any]:
+def _enrich_evidence_packet(
+    packet: dict[str, Any],
+    max_chars: int = 16000,
+    quality_source: str | None = None,
+) -> dict[str, Any]:
     papers = list(packet.get("papers") or [])
     relationships = list(packet.get("relationships") or [])
-    claims: list[dict[str, Any]] = []
+    direct_claims: list[dict[str, Any]] = []
+    background_claims: list[dict[str, Any]] = []
+
+    def add_claim(target: list[dict[str, Any]], payload: dict[str, Any], direct: bool) -> None:
+        prefix = "E" if direct else "B"
+        payload["claim_id"] = f"{prefix}{len(target) + 1}"
+        payload["support_scope"] = "direct" if direct else "background_or_analogy_only"
+        target.append(payload)
+
     for paper in papers:
         if not paper.get("relevance_passed") and not paper.get("strong_relevance_passed"):
             continue
@@ -868,9 +1023,9 @@ def _enrich_evidence_packet(packet: dict[str, Any], max_chars: int = 16000) -> d
         source_id = str(paper.get("doi") or paper.get("paper_slug") or "unknown")
         limitations = _as_text_list(summary.get("limitations_and_uncertainties"))[:3]
         abstract_only = any("abstract" in item.lower() for item in limitations)
+        target = direct_claims if strong_relevance else background_claims
         for evidence in _as_text_list(summary.get("direct_evidence"))[:4]:
-            claims.append({
-                "claim_id": f"E{len(claims) + 1}",
+            add_claim(target, {
                 "claim": evidence,
                 "evidence_type": (
                     "contextual_abstract_evidence" if abstract_only else
@@ -883,10 +1038,9 @@ def _enrich_evidence_packet(packet: dict[str, Any], max_chars: int = 16000) -> d
                 "paper_slug": paper.get("paper_slug"),
                 "title": paper.get("title"),
                 "limitations": limitations,
-            })
+            }, strong_relevance)
         for interpretation in _as_text_list(summary.get("author_interpretation"))[:2]:
-            claims.append({
-                "claim_id": f"E{len(claims) + 1}",
+            add_claim(target, {
                 "claim": interpretation,
                 "evidence_type": "author_interpretation" if strong_relevance else "contextual_author_interpretation",
                 "query_relevance": relevance,
@@ -895,50 +1049,80 @@ def _enrich_evidence_packet(packet: dict[str, Any], max_chars: int = 16000) -> d
                 "paper_slug": paper.get("paper_slug"),
                 "title": paper.get("title"),
                 "limitations": limitations,
-            })
+            }, strong_relevance)
     for relationship in relationships:
-        if not relationship.get("strong_relevance_passed"):
+        if not relationship.get("relevance_passed") and not relationship.get("strong_relevance_passed"):
             continue
+        strong_relevance = bool(relationship.get("strong_relevance_passed"))
+        target = direct_claims if strong_relevance else background_claims
         source_id = str(relationship.get("paper_id") or relationship.get("claim_id") or "unknown")
-        claims.append({
-            "claim_id": f"E{len(claims) + 1}",
+        add_claim(target, {
             "claim": (
                 f"{relationship.get('subject')} {relationship.get('relationship')} {relationship.get('object')}"
             ).strip(),
-            "evidence_type": "knowledge_graph_relationship",
-            "query_relevance": "direct_or_contextual",
+            "evidence_type": (
+                "knowledge_graph_relationship" if strong_relevance
+                else "contextual_knowledge_graph_relationship"
+            ),
+            "query_relevance": "direct" if strong_relevance else "partial_context_only",
             "source_id": source_id,
             "paper_slug": relationship.get("paper_id"),
             "limitations": [],
-        })
+        }, strong_relevance)
 
-    lines = ["Evidence-grounded LiteratureAgent packet:"]
-    if claims:
-        lines.append(
-            "Use the evidence claims below when directly relevant. Cite the claim ID and DOI or paper_slug. "
-            "Keep author interpretation separate from directly reported evidence. Claims labeled "
-            "partial_context_only support only part of the question and must not be presented as proof of the "
-            "full proposed mechanism."
-        )
-        for claim in claims:
-            lines.append(
-                f"\n[{claim['claim_id']}] {claim['evidence_type']} | relevance={claim['query_relevance']} | "
-                f"source={claim['source_id']}\nClaim: {claim['claim']}"
+    strong_evidence_count = len(direct_claims)
+    quality_flags = build_quality_flags(
+        quality_source or packet.get("original_query") or packet.get("query") or "",
+        direct_claims,
+        background_claims,
+        strong_evidence_count,
+    )
+    blocks = [
+        "Evidence-grounded LiteratureAgent packet:",
+        render_evidence_contract(len(direct_claims), len(background_claims), quality_flags),
+    ]
+    if direct_claims:
+        blocks.append("Directly relevant evidence (E#):")
+        for claim in direct_claims:
+            block = (
+                f"[{claim['claim_id']}] {claim['evidence_type']} | source={claim['source_id']}\n"
+                f"Claim: {claim['claim']}"
             )
             if claim.get("limitations"):
-                lines.append("Limitations: " + "; ".join(claim["limitations"]))
+                block += "\nLimitations: " + "; ".join(claim["limitations"])
+            blocks.append(block)
     else:
-        lines.append(
-            "No strong direct local support matched the full query. Do not present related background as proof "
-            "and do not invent citations."
+        blocks.append(
+            "No directly relevant local support matched the full scientific query. "
+            "The hypothesis may proceed as an explicitly unverified novel proposal."
         )
+    if background_claims:
+        blocks.append(
+            "Background or analogy only (B#): These items may motivate a question but cannot validate the proposed mechanism."
+        )
+        for claim in background_claims:
+            block = (
+                f"[{claim['claim_id']}] {claim['evidence_type']} | source={claim['source_id']}\n"
+                f"Background claim: {claim['claim']}"
+            )
+            if claim.get("limitations"):
+                block += "\nLimitations: " + "; ".join(claim["limitations"])
+            blocks.append(block)
 
+    claims = [*direct_claims, *background_claims]
     packet["claims"] = claims
-    packet["formatted_context"] = "\n".join(lines)[:max_chars]
+    packet["direct_claims"] = direct_claims
+    packet["background_claims"] = background_claims
+    packet["quality_flags"] = quality_flags
+    packet["formatted_context"] = bounded_packet_text(blocks, max_chars)
     provenance = packet.setdefault("provenance", {})
     provenance["claim_count"] = len(claims)
+    provenance["direct_claim_count"] = len(direct_claims)
+    provenance["background_claim_count"] = len(background_claims)
+    provenance["strong_evidence_count"] = strong_evidence_count
     provenance["claim_ids"] = [claim["claim_id"] for claim in claims]
     provenance["source_ids"] = list(dict.fromkeys(claim["source_id"] for claim in claims))
+    provenance["quality_flag_codes"] = [item["code"] for item in quality_flags]
     return packet
 
 

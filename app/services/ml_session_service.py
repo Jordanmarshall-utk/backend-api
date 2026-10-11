@@ -13,6 +13,7 @@ from app.services.curve_fitting_exports import (
     sync_ml_paths_from_curve_fitting,
 )
 from app.services.workflow_service import ML_MODEL_OPTIONS
+from app.services.reasoning_integration import reasoning_context_for_stage
 from app.tools.ml_automation import (
     MODEL_DUAL_TORCH_GP,
     MODEL_MONTE_CARLO_TREE,
@@ -224,6 +225,19 @@ def run_ml_automation(memory: Any, payload: Optional[Dict[str, Any]] = None) -> 
     sync_ml_paths_from_curve_fitting(memory)
     session = get_ml_session(memory)
     model_choice = payload.get("model_choice") or session["model_choice"]
+    reasoning_context = (
+        str(payload.get("reasoning_context") or "")
+        if "reasoning_context" in payload
+        else reasoning_context_for_stage(memory, "ml_models")
+    )
+    reasoning_guard = {
+        "context_applied": bool(reasoning_context),
+        "scope": "model_selection_and_validation",
+        "model_choice_preserved": True,
+        "model_choice": str(model_choice),
+        "numeric_data_modified": False,
+    }
+    memory.set_var("ml_reasoning_guard", reasoning_guard)
     def _resolve_file(path: Optional[str]) -> Optional[str]:
         if not path:
             return None
@@ -263,6 +277,7 @@ def run_ml_automation(memory: Any, payload: Optional[Dict[str, Any]] = None) -> 
                 "status": "error",
                 "message": "Select or export a peak CSV before running dual-objective GP.",
                 "result": {"success": False, "error": "Missing peak CSV."},
+                "reasoning_guard": reasoning_guard,
                 "session": get_ml_session(memory),
             }
         )
@@ -275,6 +290,7 @@ def run_ml_automation(memory: Any, payload: Optional[Dict[str, Any]] = None) -> 
                     "status": "error",
                     "message": "Configure Monte Carlo Decision Tree repo path before running.",
                     "result": {"success": False, "error": "Missing monte_carlo_tree.repo_path"},
+                    "reasoning_guard": reasoning_guard,
                     "session": get_ml_session(memory),
                 }
             )
@@ -305,6 +321,7 @@ def run_ml_automation(memory: Any, payload: Optional[Dict[str, Any]] = None) -> 
             "status": "success" if result.get("success") else "error",
             "message": result.get("error") or "ML automation finished.",
             "result": result,
+            "reasoning_guard": reasoning_guard,
             "session": get_ml_session(memory),
         }
     )

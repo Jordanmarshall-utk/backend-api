@@ -206,9 +206,19 @@ def sync_ml_paths_from_curve_fitting(memory: Any) -> Dict[str, Optional[str]]:
     if not json_path:
         json_path = materialize_curve_fitting_json(memory)
 
-    comp_path = memory.get_var("ml_auto_composition_path") or memory.get_var(
-        "curve_fitting_last_composition_file"
-    )
+    from app.services.composition_fallback import is_placeholder_composition
+
+    composition_blocked_reason = None
+    comp_path = memory.get_var("ml_auto_composition_path")
+    last_curve_comp = memory.get_var("curve_fitting_last_composition_file")
+    if not comp_path and last_curve_comp:
+        if is_placeholder_composition(str(last_curve_comp)):
+            composition_blocked_reason = (
+                "The curve-fitting composition file is a non-authoritative placeholder; "
+                "supply the real plate map before composition-dependent modeling."
+            )
+        else:
+            comp_path = last_curve_comp
     if comp_path:
         resolved = resolve_results_path(str(comp_path))
         if resolved:
@@ -217,10 +227,15 @@ def sync_ml_paths_from_curve_fitting(memory: Any) -> Dict[str, Optional[str]]:
             comp_path = str(Path(comp_path).resolve())
         else:
             comp_path = str(comp_path)
-    else:
+    elif not composition_blocked_reason:
         from app.tools.ml_automation import find_composition_csv
 
         comp_path = find_composition_csv(get_results_dir())
+        if comp_path and is_placeholder_composition(str(comp_path)):
+            comp_path = None
+            composition_blocked_reason = (
+                "Only a non-authoritative placeholder composition file was found."
+            )
 
     if json_path:
         memory.set_var("ml_auto_json_path", json_path)
@@ -228,5 +243,13 @@ def sync_ml_paths_from_curve_fitting(memory: Any) -> Dict[str, Optional[str]]:
         memory.set_var("ml_auto_csv_path", csv_path)
     if comp_path:
         memory.set_var("ml_auto_composition_path", comp_path)
+    elif composition_blocked_reason:
+        memory.set_var("ml_auto_composition_path", None)
+        memory.set_var("ml_composition_blocked_reason", composition_blocked_reason)
 
-    return {"json_path": json_path, "csv_path": csv_path, "composition_path": comp_path}
+    return {
+        "json_path": json_path,
+        "csv_path": csv_path,
+        "composition_path": comp_path,
+        "composition_blocked_reason": composition_blocked_reason,
+    }

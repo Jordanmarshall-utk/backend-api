@@ -54,6 +54,7 @@ class PolarisOrchestrator:
         wait_for_retrieval: bool = True,
         retrieval_timeout_seconds: int = 1800,
         retrieval_attempts: int = 3,
+        require_strong_evidence: bool = False,
     ) -> dict[str, Any]:
         result = self.dispatch(
             AgentTask("literature_agent", "evidence_packet", {"query": query, "limit": limit, "max_chars": max_chars})
@@ -69,12 +70,21 @@ class PolarisOrchestrator:
             contextual_count = int(provenance.get("paper_count") or len(packet.get("papers") or []))
             contextual_count += int(provenance.get("relationship_count") or len(packet.get("relationships") or []))
         item_count = strong_count or contextual_count
-        provenance["evidence_items_used_for_gate"] = item_count
+        gate_count = strong_count if require_strong_evidence else item_count
+        minimum_items = max(1, min_items)
+        fresh_retrieval_required = bool(
+            auto_expand_on_miss and gate_count < minimum_items
+        )
+        provenance["evidence_items_used_for_gate"] = gate_count
         provenance["evidence_gate_level"] = "strong" if strong_count else "contextual" if contextual_count else "none"
-        if item_count >= max(1, min_items) and not provenance.get("grounding_status"):
+        provenance["evidence_gate_requirement"] = (
+            "strong" if require_strong_evidence else "strong_or_contextual"
+        )
+        provenance["fresh_retrieval_required"] = fresh_retrieval_required
+        if gate_count >= minimum_items and not provenance.get("grounding_status"):
             provenance["grounding_status"] = "grounded" if strong_count else "partially_grounded"
 
-        if auto_expand_on_miss and item_count < max(1, min_items):
+        if fresh_retrieval_required:
             max_attempts = max(1, int(retrieval_attempts))
             retrieval_history: list[dict[str, Any]] = []
             per_attempt_timeout = max(30, int(retrieval_timeout_seconds) // max_attempts)
@@ -166,8 +176,13 @@ class PolarisOrchestrator:
                     provenance.get("claim_count") or provenance.get("relevant_evidence_count") or 0
                 )
                 refreshed_count = refreshed_strong_count or refreshed_contextual_count
-                provenance["evidence_items_used_for_gate"] = refreshed_count
-                if refreshed_count >= max(1, min_items):
+                refreshed_gate_count = (
+                    refreshed_strong_count
+                    if require_strong_evidence
+                    else refreshed_count
+                )
+                provenance["evidence_items_used_for_gate"] = refreshed_gate_count
+                if refreshed_gate_count >= minimum_items:
                     provenance["evidence_gate_level"] = "strong" if refreshed_strong_count else "contextual"
                     provenance["grounding_status"] = "grounded" if refreshed_strong_count else "partially_grounded"
                     break
@@ -175,17 +190,34 @@ class PolarisOrchestrator:
                 provenance = packet.setdefault("provenance", {})
                 warning = (
                     f"No strongly relevant LiteratureAgent evidence was found after {max_attempts} targeted "
-                    "retrieval attempts. Continue as an unverified scientific exploration: do not claim "
-                    "literature support and do not invent citations."
+                    "retrieval attempts. Continue as an unverified scientific exploration: contextual B# "
+                    "items may motivate the question but must not be presented as direct support, and citations "
+                    "must not be invented."
                 )
                 provenance["grounding_status"] = "unavailable_after_retries"
                 provenance["grounding_warning"] = warning
                 provenance["background_retrieval_error"] = warning
-                packet["formatted_context"] = f"No strong direct local support. {warning}"[:max_chars]
+                existing_context = str(packet.get("formatted_context") or "").strip()
+                if existing_context:
+                    separator = "\n\nDirect-support boundary: "
+                    context_budget = max(0, max_chars - len(separator) - len(warning))
+                    packet["formatted_context"] = (
+                        existing_context[:context_budget].rstrip() + separator + warning
+                    )[:max_chars]
+                else:
+                    packet["formatted_context"] = f"No strong direct local support. {warning}"[:max_chars]
 
             provenance = packet.setdefault("provenance", {})
             provenance["retrieval_attempts"] = retrieval_history
             provenance["retrieval_attempt_count"] = len(retrieval_history)
+            provenance["fresh_retrieval_performed"] = bool(retrieval_history)
+
+        provenance = packet.setdefault("provenance", {})
+        provenance["evidence_gate_requirement"] = (
+            "strong" if require_strong_evidence else "strong_or_contextual"
+        )
+        provenance["fresh_retrieval_required"] = fresh_retrieval_required
+        provenance.setdefault("fresh_retrieval_performed", False)
 
         if packet.get("formatted_context"):
             packet["formatted_context"] = str(packet["formatted_context"])[:max_chars]

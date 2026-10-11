@@ -413,7 +413,6 @@ else:
     peaks = peak_params["peaks"]
     y_fit = np.zeros_like(y_data)
 
-# Simple plot for verification only
 plt.figure(figsize=(10, 6))
 plt.plot(x_data, y_data, 'bo', label='Data', alpha=0.7, markersize=3)
 plt.plot(x_data, y_fit, 'r-', label=f'Fit (R2 = {{r2_score_value:.3f}})', linewidth=2)

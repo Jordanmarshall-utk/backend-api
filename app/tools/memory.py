@@ -318,6 +318,7 @@ class MemoryManager:
             "current_user_id",
             "current_experiment_id",
             "manual_workflow",
+            "reasoning_mode",
             "workflow_index",
             "workflow_auto_flags",
             "current_workflow_name",

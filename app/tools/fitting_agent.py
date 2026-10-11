@@ -50,6 +50,7 @@ class LLMClient:
         api_key: Optional[str] = None,
         *,
         min_delay_seconds: Optional[float] = None,
+        qwen_base_url: Optional[str] = None,
     ):
         self.provider = provider.lower()
         self.min_delay = float(min_delay_seconds) if min_delay_seconds is not None else 0.0
@@ -68,7 +69,7 @@ class LLMClient:
             if OpenAI is None:
                 raise ImportError("openai not installed. pip install openai")
 
-            base_url = os.environ.get("QWEN_BASE_URL") or "https://router.huggingface.co/v1"
+            base_url = qwen_base_url or os.environ.get("QWEN_BASE_URL") or "https://router.huggingface.co/v1"
             self.client = OpenAI(api_key=key, base_url=base_url)
             # Prefer vision-capable model by default because curve fitting uses image analysis.
             self.model_id = model_id or "Qwen/Qwen2.5-VL-72B-Instruct"
@@ -232,6 +233,80 @@ class PeakResult:
     baseline: Optional[float] = None
 
 
+def deterministic_peak_guesses(
+    x: np.ndarray,
+    y: np.ndarray,
+    max_peaks: int = 4,
+) -> PeakResult:
+    """Build data-derived peak guesses when an advisory LLM is unavailable."""
+    from scipy.signal import find_peaks, peak_widths
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    x_values = np.asarray(x[finite], dtype=float)
+    y_values = np.asarray(y[finite], dtype=float)
+    if not len(x_values):
+        return PeakResult(peaks=[], baseline=0.0)
+
+    order = np.argsort(x_values)
+    x_values = x_values[order]
+    y_values = y_values[order]
+    baseline = float(np.percentile(y_values, 10))
+    dynamic_range = float(np.ptp(y_values))
+    prominence_floor = max(dynamic_range * 0.04, float(np.std(y_values)) * 0.35, 1e-9)
+    minimum_distance = max(3, len(y_values) // max(8, max_peaks * 4))
+
+    # Peaks at the acquisition boundary are not spectrally resolved because one
+    # side of the line shape is unobserved.  Keep them out of the seed set and
+    # report them later through QA instead of allowing the optimizer to place a
+    # center beyond the measured wavelength domain.
+    edge_points = max(2, int(round(len(y_values) * 0.02)))
+    if len(y_values) > 2 * edge_points + 2:
+        search_y = y_values[edge_points:-edge_points]
+        index_offset = edge_points
+    else:
+        search_y = y_values
+        index_offset = 0
+    indices, properties = find_peaks(
+        search_y,
+        prominence=prominence_floor,
+        distance=minimum_distance,
+    )
+    indices = indices + index_offset
+    if not len(indices):
+        indices = np.asarray([int(np.argmax(y_values))])
+        prominences = np.asarray([max(float(y_values[indices[0]] - baseline), 0.0)])
+    else:
+        prominences = np.asarray(properties.get("prominences", y_values[indices] - baseline))
+
+    ranked = sorted(
+        zip(indices.tolist(), prominences.tolist()),
+        key=lambda item: item[1],
+        reverse=True,
+    )[: max(1, max_peaks)]
+    selected_indices = np.asarray([item[0] for item in ranked], dtype=int)
+    selected_prominences = {item[0]: float(item[1]) for item in ranked}
+    try:
+        widths = peak_widths(y_values, selected_indices, rel_height=0.5)[0]
+        step = float(np.median(np.diff(x_values))) if len(x_values) > 1 else 1.0
+        fwhm_by_index = {
+            int(index): max(float(width) * abs(step), abs(step))
+            for index, width in zip(selected_indices, widths)
+        }
+    except Exception:
+        fwhm_by_index = {int(index): None for index in selected_indices}
+
+    peaks = [
+        PeakGuess(
+            center=float(x_values[index]),
+            height=max(float(y_values[index] - baseline), 0.0),
+            fwhm=fwhm_by_index.get(int(index)),
+            prominence=selected_prominences.get(int(index)),
+        )
+        for index in sorted(selected_indices, key=lambda value: x_values[value])
+    ]
+    return PeakResult(peaks=peaks, baseline=baseline)
+
+
 def smooth_spectrum(
     y: np.ndarray,
     window_size: Optional[int] = None,
@@ -367,7 +442,6 @@ def has_substantial_peaks(
                 # If scipy not available, use simple numpy-based peak detection
                 # Find local maxima manually
                 if len(y_trimmed) > 3:
-                    # Simple peak detection: find points higher than neighbors
                     diff = np.diff(y_trimmed)
                     local_maxima = []
                     for i in range(1, len(diff)):
@@ -1030,15 +1104,92 @@ def assess_fitting_quality(fit_result: PeakFitResult) -> Dict[str, str]:
     else:
         assessments['r2'] = " Poor fit (R² < 0.80)"
 
-    # Chi-squared assessment
-    if fit_result.stats.redchi < 2.0:
-        assessments['chi2'] = "Good chi-squared (reduced χ² < 2.0)"
-    elif fit_result.stats.redchi < 5.0:
-        assessments['chi2'] = " Acceptable chi-squared (reduced χ² < 5.0)"
-    else:
-        assessments['chi2'] = "High chi-squared (reduced χ² > 5.0)"
+    # lmfit's redchi is only a calibrated reduced chi-square when residual
+    # weights are inverse measurement uncertainties.  This fitter deliberately
+    # uses peak-emphasis weights, so expose the value as a diagnostic without
+    # applying the statistically invalid <2/<5 thresholds.
+    assessments['weighted_residual_variance'] = (
+        f"Weighted residual variance = {fit_result.stats.redchi:.6g} "
+        "(diagnostic only; measurement uncertainties were not supplied)"
+    )
 
     return assessments
+
+
+def build_fit_qa(
+    fit_result: PeakFitResult,
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    review_r2_threshold: float = 0.95,
+    boundary_margin_nm: float = 5.0,
+) -> Dict[str, object]:
+    """Build deterministic, scale-aware QA flags for a fitted spectrum."""
+    finite_x = np.asarray(x, dtype=float)[np.isfinite(x)]
+    finite_y = np.asarray(y, dtype=float)[np.isfinite(y)]
+    if not len(finite_x):
+        return {
+            "review_required": True,
+            "review_reasons": ["no_finite_wavelengths"],
+            "normalized_rmse": None,
+            "boundary_margin_nm": float(boundary_margin_nm),
+        }
+
+    xmin, xmax = float(np.min(finite_x)), float(np.max(finite_x))
+    intensity_span = float(np.ptp(finite_y)) if len(finite_y) else 0.0
+    normalized_rmse = (
+        float(fit_result.stats.rmse) / intensity_span if intensity_span > 0 else None
+    )
+    centers = [float(peak.center) for peak in fit_result.peaks]
+    outside = [center for center in centers if center < xmin or center > xmax]
+    boundary = [
+        center
+        for center in centers
+        if xmin <= center <= xmax
+        and (center - xmin <= boundary_margin_nm or xmax - center <= boundary_margin_nm)
+    ]
+    pegged: List[float] = []
+    lmfit_result = fit_result.lmfit_result
+    if lmfit_result is not None and hasattr(lmfit_result, "params"):
+        for index, center in enumerate(centers):
+            param = lmfit_result.params.get(f"p{index}_center")
+            if param is None:
+                continue
+            if np.isfinite(param.min) and abs(float(param.value) - float(param.min)) <= 0.5:
+                pegged.append(center)
+            elif np.isfinite(param.max) and abs(float(param.value) - float(param.max)) <= 0.5:
+                pegged.append(center)
+
+    reasons: List[str] = []
+    if not fit_result.success:
+        reasons.append("fit_below_success_threshold")
+    if fit_result.stats.r2 < review_r2_threshold:
+        reasons.append("r2_below_review_threshold")
+    if normalized_rmse is not None and normalized_rmse > 0.10:
+        reasons.append("normalized_rmse_above_0.10")
+    if outside:
+        reasons.append("peak_center_outside_measured_range")
+    if boundary:
+        reasons.append("boundary_adjacent_peak")
+    if pegged:
+        reasons.append("peak_center_at_fit_bound")
+
+    return {
+        "review_required": bool(reasons),
+        "review_reasons": reasons,
+        "review_r2_threshold": float(review_r2_threshold),
+        "normalized_rmse": normalized_rmse,
+        "measured_wavelength_min_nm": xmin,
+        "measured_wavelength_max_nm": xmax,
+        "boundary_margin_nm": float(boundary_margin_nm),
+        "outside_range_centers_nm": outside,
+        "boundary_adjacent_centers_nm": boundary,
+        "bound_pegged_centers_nm": pegged,
+        "weighted_residual_variance": float(fit_result.stats.redchi),
+        "weighted_residual_variance_interpretation": (
+            "Diagnostic only; peak-emphasis weights are not inverse measurement uncertainties."
+        ),
+    }
 
 
 def save_all_wells_results(all_results: List[Dict[str, object]], filename: str = "results/all_wells_analysis.json") -> str:
@@ -1083,7 +1234,7 @@ def save_all_wells_results(all_results: List[Dict[str, object]], filename: str =
         # Add additional metrics that pick_good_peaks expects
         total_area = sum(peak.height * peak.fwhm * np.sqrt(2 * np.pi) / 2.354820045 for peak in fit_result.peaks if peak.fwhm)
         for i, peak in enumerate(fit_result.peaks):
-            prefix = f"p{i+1}"  # Use p1, p2, p3 format
+            prefix = f"p{i}"
             metrics[f'{prefix}_center'] = peak.center
             metrics[f'{prefix}_FWHM_est'] = peak.fwhm if peak.fwhm else np.nan
             metrics[f'{prefix}_height'] = peak.height
@@ -1134,6 +1285,8 @@ def save_all_wells_results(all_results: List[Dict[str, object]], filename: str =
                 "all_peaks": peaks_data
             },
             "quality_assessment": result['quality_assessment'],
+            "qa": result.get('qa', {}),
+            "analysis_mode": result.get('analysis_mode', 'unknown'),
             "files": result['files']
         }
 
@@ -1177,7 +1330,7 @@ def export_peak_data_to_csv(all_results: List[Dict[str, object]], filename: str 
 
             total_area = sum(peak.height * peak.fwhm * np.sqrt(2 * np.pi) / 2.354820045 for peak in fit_result.peaks if peak.fwhm)
             for i, peak in enumerate(fit_result.peaks):
-                prefix = f"p{i+1}"
+                prefix = f"p{i}"
                 metrics[f'{prefix}_center'] = peak.center
                 metrics[f'{prefix}_FWHM_est'] = peak.fwhm if peak.fwhm else np.nan
                 metrics[f'{prefix}_height'] = peak.height
@@ -1522,14 +1675,15 @@ def create_skipped_fit_result(x: np.ndarray, y: np.ndarray, model_kind: str = "g
 def run_complete_analysis(
     config: 'CurveFittingConfig',
     well_name: str,
-    llm: LLMClient,
+    llm: Optional[LLMClient],
     reads: Union[int, List[int], str] = "auto",  # int, list[int], "auto", "all", or str like "2" / "1,3-5"
     max_peaks: int = 4,
     model_kind: Optional[str] = None,
     r2_target: float = 0.90,
     max_attempts: int = 3,
     save_plots: bool = True,  # Set to False to skip saving final PNG files (LLM analysis still runs)
-    skip_no_peaks: bool = False  # Skip fitting if LLM detects no substantial peaks
+    skip_no_peaks: bool = False,  # Skip fitting if no substantial peaks are detected
+    output_dir: str = "results",
 ) -> Union[Dict[str, object], List[Dict[str, object]]]:
     """Run complete analysis workflow for a single well with flexible read selection."""
 
@@ -1555,19 +1709,24 @@ def run_complete_analysis(
     print(f"  Analyzing reads: {target_reads}")
 
     # Set up shared resources
-    os.makedirs("analysis_output", exist_ok=True)
+    analysis_output_dir = os.path.join(output_dir, "_analysis_tmp")
+    os.makedirs(analysis_output_dir, exist_ok=True)
     if save_plots:
-        os.makedirs("results", exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
 
     # LLM model selection (once per well, not per read)
     if model_kind is None:
-        print(f"  Selecting model type for {well_name}...")
-        # Use first read for model selection
-        x_sample, y_sample = get_xy_for_well(config, well_name, read=target_reads[0])
-        # Smooth sample data for model selection too
-        y_sample_smoothed = smooth_spectrum(y_sample, method="savgol")
-        model_kind = select_model_for_spectrum(llm, x_sample, y_sample_smoothed, well_name)
-        print(f"  LLM selected model: {model_kind}")
+        if llm is None:
+            model_kind = "gaussian"
+            print(f"  Deterministic model selection for {well_name}: {model_kind}")
+        else:
+            print(f"  Selecting model type for {well_name}...")
+            # Use first read for model selection
+            x_sample, y_sample = get_xy_for_well(config, well_name, read=target_reads[0])
+            # Smooth sample data for model selection too
+            y_sample_smoothed = smooth_spectrum(y_sample, method="savgol")
+            model_kind = select_model_for_spectrum(llm, x_sample, y_sample_smoothed, well_name)
+            print(f"  LLM selected model: {model_kind}")
 
     # Analyze all target reads efficiently
     all_read_results = []
@@ -1583,21 +1742,54 @@ def run_complete_analysis(
 
         # LLM numeric analysis (backup) - use smoothed data for better peak detection
         sys_prompt_numeric = get_prompt("numeric")
-        llm_result = llm_guess_peaks(llm, x, y_smoothed, use_image=False, system_prompt=sys_prompt_numeric, max_peaks=max_peaks)
+        try:
+            if llm is None:
+                raise RuntimeError("LLM advisory mode disabled")
+            llm_result = llm_guess_peaks(
+                llm,
+                x,
+                y_smoothed,
+                use_image=False,
+                system_prompt=sys_prompt_numeric,
+                max_peaks=max_peaks,
+            )
+        except Exception as exc:
+            print(
+                f"      LLM numeric peak guess unavailable ({exc}); "
+                "using deterministic prominence-based guesses"
+            )
+            llm_result = deterministic_peak_guesses(x, y_smoothed, max_peaks=max_peaks)
 
         # LLM image analysis (PRIMARY - visual analysis is more reliable)
         # Use smoothed data for image so LLM sees cleaner peaks
-        temp_spectrum_path = f'analysis_output/temp_spectrum_{well_name}_read{read}.png'
-        save_plot_png(x, y_smoothed, temp_spectrum_path, title=f'PL Spectrum - Well {well_name} Read {read}')
+        if llm is not None:
+            temp_spectrum_path = os.path.join(
+                analysis_output_dir, f'temp_spectrum_{well_name}_read{read}.png'
+            )
+            save_plot_png(x, y_smoothed, temp_spectrum_path, title=f'PL Spectrum - Well {well_name} Read {read}')
 
-        sys_prompt_image = get_prompt("image")
-        llm_image_result = llm_guess_peaks_from_image(llm, temp_spectrum_path, system_prompt=sys_prompt_image, max_peaks=max_peaks)
+            sys_prompt_image = get_prompt("image")
+            try:
+                llm_image_result = llm_guess_peaks_from_image(
+                    llm,
+                    temp_spectrum_path,
+                    system_prompt=sys_prompt_image,
+                    max_peaks=max_peaks,
+                )
+            except Exception as exc:
+                print(
+                    f"      LLM image peak guess unavailable ({exc}); "
+                    "using the numeric or deterministic peak set"
+                )
+                llm_image_result = PeakResult(peaks=[], baseline=llm_result.baseline)
 
-        # Clean up temp spectrum immediately
-        try:
-            os.remove(temp_spectrum_path)
-        except:
-            pass
+            # Clean up temp spectrum immediately
+            try:
+                os.remove(temp_spectrum_path)
+            except OSError:
+                pass
+        else:
+            llm_image_result = PeakResult(peaks=[], baseline=llm_result.baseline)
 
         # Use IMAGE-based result for fitting (more reliable than numeric)
         # Fall back to numeric if image result has no peaks
@@ -1631,17 +1823,28 @@ def run_complete_analysis(
         fit_result = fit_peaks_lmfit_with_retry(
             x, y_smoothed, peaks_to_use,
             model_kind=model_kind,
-            r2_target=0.92,
+            r2_target=r2_target,
             max_attempts=max_attempts
         )
 
         # LLM visual assessment (create temp plot, assess, delete)
         # Use smoothed data for assessment plots
-        temp_plot_path = f'analysis_output/temp_fit_{well_name}_read{read}.png'
-        save_fitting_plot_png(x, y_smoothed, fit_result, temp_plot_path,
-                              title=f'Initial Fit - Well {well_name} Read {read}')
-
-        llm_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, fit_result.stats.r2, well_name)
+        temp_plot_path = os.path.join(analysis_output_dir, f'temp_fit_{well_name}_read{read}.png')
+        if llm is not None:
+            save_fitting_plot_png(x, y_smoothed, fit_result, temp_plot_path,
+                                  title=f'Initial Fit - Well {well_name} Read {read}')
+            try:
+                llm_assessment = assess_fit_quality_with_llm(
+                    llm, temp_plot_path, fit_result.stats.r2, well_name
+                )
+            except Exception as exc:
+                print(
+                    f"      LLM visual assessment unavailable ({exc}); "
+                    "continuing with deterministic fit diagnostics"
+                )
+                llm_assessment = fit_result.stats.r2 >= r2_target
+        else:
+            llm_assessment = fit_result.stats.r2 >= r2_target
 
         # Retry logic with alternative models
         retry_count = 0
@@ -1656,7 +1859,7 @@ def run_complete_analysis(
             retry_count += 1
             print(f"      Attempt {retry_count}: R²={fit_result.stats.r2:.3f}, LLM={'good' if llm_assessment else 'poor'}")
 
-            alt_model = alternative_models[retry_count % len(alternative_models)]
+            alt_model = alternative_models[(retry_count - 1) % len(alternative_models)]
 
             # LLM refinement based on residuals
             if fit_result.lmfit_result is not None:
@@ -1686,10 +1889,19 @@ def run_complete_analysis(
                             pk.height = (pk.height or 0) + res_at_center
                 
                 # Use BOOSTED peaks for LLM refinement input
-                refined_peaks = llm_refine_peaks_from_residuals(
-                    llm, x, y_smoothed, boosted_peaks, current_residuals, well_name, max_peaks
-                )
-                print(f"      LLM refined peaks: {len(refined_peaks.peaks)} peaks")
+                try:
+                    if llm is None:
+                        raise RuntimeError("LLM advisory mode disabled")
+                    refined_peaks = llm_refine_peaks_from_residuals(
+                        llm, x, y_smoothed, boosted_peaks, current_residuals, well_name, max_peaks
+                    )
+                    print(f"      LLM refined peaks: {len(refined_peaks.peaks)} peaks")
+                except Exception as exc:
+                    print(
+                        f"      LLM residual refinement unavailable ({exc}); "
+                        "reusing the deterministic peak set"
+                    )
+                    refined_peaks = llm_result
             else:
                 refined_peaks = llm_result
 
@@ -1697,14 +1909,26 @@ def run_complete_analysis(
                 alt_result = fit_peaks_lmfit_with_retry(
                     x, y_smoothed, refined_peaks,
                     model_kind=alt_model,
-                    r2_target=0.92,
+                    r2_target=r2_target,
                     max_attempts=max_attempts
                 )
 
                 if alt_result and alt_result.stats.r2 > best_fit.stats.r2:
-                    save_fitting_plot_png(x, y_smoothed, alt_result, temp_plot_path,
-                                         title=f'Alt Fit ({alt_model}) - {well_name} Read {read}')
-                    alt_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, alt_result.stats.r2, well_name)
+                    if llm is not None:
+                        save_fitting_plot_png(x, y_smoothed, alt_result, temp_plot_path,
+                                             title=f'Alt Fit ({alt_model}) - {well_name} Read {read}')
+                        try:
+                            alt_assessment = assess_fit_quality_with_llm(
+                                llm, temp_plot_path, alt_result.stats.r2, well_name
+                            )
+                        except Exception as exc:
+                            print(
+                                f"      LLM alternative-fit assessment unavailable ({exc}); "
+                                "using the deterministic R-squared threshold"
+                            )
+                            alt_assessment = alt_result.stats.r2 >= r2_target
+                    else:
+                        alt_assessment = alt_result.stats.r2 >= r2_target
 
                     if alt_result.stats.r2 > r2_target and alt_assessment:
                         print(f"      Success with {alt_model}: R²={alt_result.stats.r2:.3f}")
@@ -1719,12 +1943,24 @@ def run_complete_analysis(
                 continue
 
             fit_result = best_fit
-            llm_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, fit_result.stats.r2, well_name)
+            if llm is not None:
+                try:
+                    llm_assessment = assess_fit_quality_with_llm(
+                        llm, temp_plot_path, fit_result.stats.r2, well_name
+                    )
+                except Exception as exc:
+                    print(
+                        f"      LLM retry assessment unavailable ({exc}); "
+                        "using the deterministic R-squared threshold"
+                    )
+                    llm_assessment = fit_result.stats.r2 >= r2_target
+            else:
+                llm_assessment = fit_result.stats.r2 >= r2_target
 
         # Clean up temp plot
         try:
             os.remove(temp_plot_path)
-        except:
+        except OSError:
             pass
 
         fit_result = best_fit
@@ -1734,11 +1970,11 @@ def run_complete_analysis(
         if save_plots:
             if len(target_reads) > 1:
                 # Multiple reads: include read number in filename
-                fitting_plot_file = save_fitting_plot_png(x, y_smoothed, fit_result, f'results/fit_results_{well_name}_read{read}.png',
+                fitting_plot_file = save_fitting_plot_png(x, y_smoothed, fit_result, os.path.join(output_dir, f'fit_results_{well_name}_read{read}.png'),
                                                          title=f'Peak Fitting - {well_name} Read {read}')
             else:
                 # Single read: use simple filename
-                fitting_plot_file = save_fitting_plot_png(x, y_smoothed, fit_result, f'results/fit_results_{well_name}.png',
+                fitting_plot_file = save_fitting_plot_png(x, y_smoothed, fit_result, os.path.join(output_dir, f'fit_results_{well_name}.png'),
                                                          title=f'Peak Fitting - {well_name}')
             files_dict = {'fitting_plot': fitting_plot_file}
         else:
@@ -1746,6 +1982,7 @@ def run_complete_analysis(
 
         # Quality assessment
         quality_assessment = assess_fitting_quality(fit_result)
+        qa = build_fit_qa(fit_result, x, y_smoothed)
 
         # Store result
         # Store both original and smoothed data for reference
@@ -1757,7 +1994,9 @@ def run_complete_analysis(
             'llm_image_result': llm_image_result,
             'fit_result': fit_result,
             'files': files_dict,
-            'quality_assessment': quality_assessment
+            'quality_assessment': quality_assessment,
+            'qa': qa,
+            'analysis_mode': 'llm_advisory' if llm is not None else 'deterministic',
         }
         all_read_results.append(result)
 
@@ -1965,7 +2204,7 @@ def _build_composite_model(
         comp = select_peak_model(model_kind)(prefix=prefix)
         model = model + comp
 
-        c0 = float(pk.center)
+        c0 = float(np.clip(float(pk.center), xmin, xmax))
         
         # Find the closest x index to the peak center
         center_idx = np.argmin(np.abs(x - c0))
@@ -2010,7 +2249,11 @@ def _build_composite_model(
 
         p = comp.make_params()
         p[f"{prefix}amplitude"].set(value=float(amp0), min=0.0, max=np.inf)
-        p[f"{prefix}center"].set(value=c0, min=c0 - center_window, max=c0 + center_window)
+        center_min = max(xmin, c0 - center_window)
+        center_max = min(xmax, c0 + center_window)
+        if center_max <= center_min:
+            center_min, center_max = xmin, xmax
+        p[f"{prefix}center"].set(value=c0, min=center_min, max=center_max)
         p[f"{prefix}sigma"].set(value=float(sigma0), min=sigma_bounds[0], max=sigma_bounds[1])
 
         if model_kind == "voigt" and f"{prefix}gamma" in p:
@@ -2129,11 +2372,11 @@ def fit_peaks_lmfit_with_retry(
         y = y[:min_len]
         print(f"Warning: x and y had different lengths, trimmed to {min_len} points")
 
-    rng = np.random.default_rng()
-    xmin, xmax = float(np.min(x)), float(np.max(x))
-    span = xmax - xmin
-
-    # Removed random jittering - using LLM-based refinement instead
+    # A single call uses a fixed seed set. Random jittering was removed, so
+    # repeating this loop would produce the same fit and waste substantial
+    # time on plate-scale analyses. Seed/model refinement happens in
+    # ``run_complete_analysis`` between calls to this function.
+    effective_attempts = min(max_attempts, 1)
 
     best_result = None
     best_stats = None
@@ -2145,7 +2388,7 @@ def fit_peaks_lmfit_with_retry(
     attempt = 0
     current_seed = seed
 
-    while attempt < max_attempts:
+    while attempt < effective_attempts:
         attempt += 1
         try:
             result = _fit_once(x, y, current_seed.peaks, current_seed.baseline, model_kind=model_kind)
@@ -2921,7 +3164,10 @@ class CurveFitting:
         tensor = np.full((num_reads, max_wavelengths, num_wells), fill_value=np.nan, dtype=float)
         
         for i, r in enumerate(read_indices):
-            df = blocks[r].reindex(columns=common_wells)
+            block = blocks[r]
+            if block.columns.has_duplicates:
+                block = block.loc[:, ~block.columns.duplicated(keep="first")]
+            df = block.reindex(columns=common_wells)
             arr = df.to_numpy(dtype=float)
             actual_length = arr.shape[0]
             actual_wells = arr.shape[1]

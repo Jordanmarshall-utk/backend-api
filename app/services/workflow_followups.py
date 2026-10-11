@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from app.services.reasoning_integration import prepare_pipeline_reasoning
+
 # Builder step labels → registered agent names
 STEP_TO_AGENT_NAME: Dict[str, str] = {
     "Hypothesis Agent": "Hypothesis Agent",
@@ -135,7 +137,13 @@ def on_curve_fitting_complete(memory: Any) -> Dict[str, Any]:
 
     from app.services.ml_session_service import run_ml_automation
 
-    ml_result = run_ml_automation(memory, {"model_choice": model})
+    ml_payload, _ = prepare_pipeline_reasoning(
+        memory,
+        "ML Models",
+        stage="ml_models",
+        payload={"action": "run", "model_choice": model},
+    )
+    ml_result = run_ml_automation(memory, ml_payload)
     out["ml_automation"] = ml_result
     if ml_result.get("status") == "success" or (
         isinstance(ml_result.get("result"), dict)
@@ -150,7 +158,13 @@ def on_curve_fitting_complete(memory: Any) -> Dict[str, Any]:
         ).get("Analysis Agent"):
             from app.services.analysis_service import run_analysis_pipeline
 
-            analysis_result = run_analysis_pipeline(memory, {})
+            analysis_payload, _ = prepare_pipeline_reasoning(
+                memory,
+                "Analysis Agent",
+                stage="analysis",
+                payload={"action": "run"},
+            )
+            analysis_result = run_analysis_pipeline(memory, analysis_payload)
             out["analysis_automation"] = analysis_result
             if analysis_result.get("status") == "success":
                 set_workflow_step(memory, "Analysis Agent")

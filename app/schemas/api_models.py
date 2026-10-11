@@ -73,6 +73,7 @@ class HypothesisChatRequest(BaseModel):
     choice: Optional[str] = None
     experiment_id: Optional[int] = None
     reasoning_policy: Optional[str] = "auto"
+    retry_guidance: Optional[str] = None
 
 
 class HypothesisChatBubble(BaseModel):
@@ -99,6 +100,7 @@ class HypothesisChatResponse(BaseModel):
     document_markdown: Optional[str] = None
     pdf_url: Optional[str] = None
     reasoning_metadata: Optional[Dict[str, Any]] = None
+    reasoning_plan: Optional[Dict[str, Any]] = None
 
 
 class WorkflowRunRequest(BaseModel):
@@ -181,6 +183,7 @@ class AppSettings(BaseModel):
     llm_model: Optional[str] = None
     qwen_base_url: Optional[str] = None
     routing_mode: Optional[str] = None
+    reasoning_mode: Optional[Literal["Legacy", "Shadow", "Active"]] = None
     max_hypothesis_rounds: Optional[int] = None
     watcher_directory: Optional[str] = None
     watcher_results_dir: Optional[str] = None
@@ -195,6 +198,7 @@ class AppSettingsPatch(AppSettings):
 
 class AppSettingsResponse(AppSettings):
     api_key_configured: bool = False
+    last_reasoning_plan: Optional[Dict[str, Any]] = None
 
 
 class HistoryEntry(BaseModel):

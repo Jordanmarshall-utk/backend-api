@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 DEFAULT_BATCHES = {"pilot": 100, "scale": 750, "full": 1000}
+REPO_ROOT = Path(__file__).resolve().parents[4]
 TARGET_RICH_QUERY = (
     '"perovskite solar cell" experimental device PCE J-V Voc Jsc fill factor '
     "stability T80 T95 retention lifetime aging humidity illumination encapsulation"
@@ -70,12 +71,24 @@ def main() -> None:
         default=[TARGET_RICH_QUERY],
         help="Target-rich Crossref/RSS query words for this batch. Multiple arguments are joined safely.",
     )
-    parser.add_argument("--campaign-root", type=Path, default=Path(r"E:\LiteratureAgent\expansion_campaign"))
+    parser.add_argument(
+        "--campaign-root",
+        type=Path,
+        default=REPO_ROOT / "expansion_campaign",
+    )
     parser.add_argument("--controller", type=Path, default=Path(__file__).parents[1] / "literature_agent_full_end_to_end_v21_3_english_sanitizer.py")
-    parser.add_argument("--base-csv", type=Path, default=Path(r"C:\Users\jorda\Downloads\Perovskite_database_content_all_data.csv"))
-    parser.add_argument("--ontology-path", type=Path, default=Path(r"E:\LiteratureAgentProject\config\perovskite_ontology_library_v19.json"))
+    parser.add_argument(
+        "--base-csv",
+        type=Path,
+        default=REPO_ROOT / "data" / "Perovskite_database_content_all_data.csv",
+    )
+    parser.add_argument(
+        "--ontology-path",
+        type=Path,
+        default=REPO_ROOT / "config" / "perovskite_ontology_library_v19.json",
+    )
     parser.add_argument("--oauth-secrets", type=Path, help="Optional Google Drive OAuth client-secrets JSON.")
-    parser.add_argument("--work-dir", type=Path, default=Path(r"E:\LiteratureAgent\lit_outputs"))
+    parser.add_argument("--work-dir", type=Path, default=REPO_ROOT / "lit_outputs")
     parser.add_argument("--run-model-check", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

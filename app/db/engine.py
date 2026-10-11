@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -14,10 +15,22 @@ def get_db_url() -> str:
         raw = raw.replace("postgres://", "postgresql+asyncpg://", 1)
     if raw.startswith("postgresql://"):
         raw = raw.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if raw.startswith("postgresql+psycopg://"):
+        raw = raw.replace("postgresql+psycopg://", "postgresql+asyncpg://", 1)
+    if raw.startswith("postgresql+psycopg2://"):
+        raw = raw.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
     if raw.startswith("postgresql+asyncpg://") or raw.startswith("sqlite+aiosqlite://"):
         return raw
     if raw.startswith("sqlite://"):
         return raw.replace("sqlite://", "sqlite+aiosqlite://", 1)
+    if raw:
+        raise ValueError(
+            "Unsupported DATABASE_URL scheme. Use PostgreSQL or SQLite with an async driver."
+        )
+    db_path = os.environ.get("POLARIS_DB_PATH", "").strip()
+    if db_path:
+        resolved = Path(db_path).expanduser().resolve()
+        return f"sqlite+aiosqlite:///{resolved.as_posix()}"
     return _DEFAULT_URL
 
 

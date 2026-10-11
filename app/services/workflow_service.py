@@ -253,17 +253,21 @@ def run_demo_workflow(memory: Any, *, auto_fit: bool = True) -> Dict[str, Any]:
     memory.set_var("selected_wells", set(wells_demo))
 
     demo_hypothesis = (
-        "Varying the ratio of PEA2PbI4 to FAPbI3 will systematically shift the PL emission peak. "
-        "We hypothesize a monotonic relationship between composition and wavelength from ~450–850 nm."
+        "Increasing PEA-rich, lower-dimensional character should strengthen phase-resolved emission "
+        "near 619, 574, and 522 nm relative to the long-wavelength FAPbI3 feature near 815 nm. "
+        "The dominant peak may switch between coexisting phases rather than shift linearly."
     )
-    demo_clarified = "How does the PEA2PbI4/FAPbI3 composition ratio affect PL emission wavelength?"
+    demo_clarified = (
+        "How does the PEA2PbI4/FAPbI3 composition ratio affect phase-resolved "
+        "photoluminescence emission?"
+    )
     demo_socratic = (
-        "What mechanisms drive the wavelength shift with composition? "
-        "How can we map composition space efficiently?"
+        "Which bands represent coexisting lower-dimensional and 3D phases, and where does the "
+        "dominant emitting phase change? Which replicate and processing controls test that result?"
     )
-    memory.insert_interaction("assistant", demo_hypothesis, "hypothesis", "demo")
-    memory.insert_interaction("user", demo_clarified, "clarified_question", "demo")
-    memory.insert_interaction("assistant", demo_socratic, "socratic_pass", "demo")
+    memory.insert_interaction("assistant", demo_hypothesis, "hypothesis", "hypothesis")
+    memory.insert_interaction("user", demo_clarified, "clarified_question", "hypothesis")
+    memory.insert_interaction("assistant", demo_socratic, "socratic_pass", "hypothesis")
     memory.set_var("hypothesis_ready", True)
     memory.set_var("last_hypothesis", demo_hypothesis)
 
@@ -274,17 +278,23 @@ def run_demo_workflow(memory: Any, *, auto_fit: bool = True) -> Dict[str, Any]:
     )
     worklist_csv = generate_demo_worklist(comp_path, max_vol)
     demo_plan = (
-        "Initial screening of 15 PEA2PbI4/FAPbI3 compositions across A1–B3. "
-        "Fluorescence spectra 450–900 nm. Goal: map composition vs PL peak wavelength."
+        "Screen 15 PEA2PbI4/FAPbI3 compositions across A1-B3 with replicate and process controls. "
+        "Collect PL spectra from 450-900 nm and compare fitted phase intensities across composition."
     )
     demo_outputs = {
         "plan": demo_plan,
         "worklist": worklist_csv,
-        "layout": "A1–A12, B1–B3 (96-well plate)",
-        "protocol": "PL measurement protocol (synthetic demo).",
+        "layout": "A1-A12, B1-B3 (96-well plate)",
+        "protocol": "Phase-resolved PL measurement protocol with composition-series controls.",
     }
     memory.set_var("experimental_outputs", demo_outputs)
     memory.set_var("workflow_experiment_outputs", demo_outputs)
+    memory.insert_interaction(
+        "assistant",
+        "Generated a constrained 15-well composition series, plate layout, and phase-resolved PL protocol.",
+        "experimental_plan",
+        "experiment",
+    )
 
     memory.set_var("demo_workflow_running", True)
     memory.set_var("auto_run_curve_fitting", True)

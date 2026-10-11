@@ -26,9 +26,10 @@ The graph separates three epistemic levels:
 Directional relationships such as `IMPROVES`, `REDUCES`, and `PROMOTES` retain
 the source claim, paper, extraction field, and evidence links.
 
-The implementation produces portable GraphML/JSONL and Neo4j-compatible bulk
-import CSVs. Neo4j is an optional serving/database layer, not a requirement for
-building or validating the graph.
+The runtime writer creates Neo4j-compatible bulk-import CSVs, reports, derived
+views, and plots by default. Portable JSONL and GraphML are opt-in formats for
+consumers that explicitly require them. Neo4j remains an optional
+serving/database layer, not a requirement for building or validating the graph.
 
 ## Initial Graph Schema
 
@@ -104,33 +105,36 @@ provenance_source
 ## Build Command
 
 ```powershell
-cd "E:\LiteratureAgentProject"
+cd "<repo_root>"
 
 python .\scripts\build_literature_knowledge_graph.py `
-  --records "E:\LiteratureAgent\lit_outputs\csv\all_records.csv" `
-  --ontology ".\config\perovskite_ontology_library_v19.json" `
-  --work-dir "E:\LiteratureAgent\lit_outputs" `
-  --out "E:\LiteratureAgent\artifacts_literature_knowledge_graph"
+  --records "<repo_root>\lit_outputs\csv\all_records.csv" `
+  --ontology "<repo_root>\config\perovskite_ontology_library_v19.json" `
+  --work-dir "<repo_root>\lit_outputs" `
+  --out "<repo_root>\artifacts\literature_knowledge_graph"
 ```
+
+Portable exports are optional. Request them only for a specific external
+consumer by adding `--portable-formats jsonl graphml`.
 
 The same build can be run through the main LiteratureAgent controller:
 
 ```powershell
-python "E:\LiteratureAgentProject\literature_agent_full_end_to_end_v21_3_english_sanitizer.py" `
+python "<repo_root>\literature_agent_full_end_to_end_v21_3_english_sanitizer.py" `
   --pipeline_stage knowledge_graph `
-  --base_csv "C:\Users\jorda\Downloads\Perovskite_database_content_all_data.csv" `
-  --ontology_path "E:\LiteratureAgentProject\config\perovskite_ontology_library_v19.json" `
-  --work_dir "E:\LiteratureAgent\lit_outputs" `
-  --knowledge_graph_out_dir "E:\LiteratureAgent\artifacts_literature_knowledge_graph"
+  --base_csv "<repo_root>\data\Perovskite_database_content_all_data.csv" `
+  --ontology_path "<repo_root>\config\perovskite_ontology_library_v19.json" `
+  --work_dir "<repo_root>\lit_outputs" `
+  --knowledge_graph_out_dir "<repo_root>\artifacts\literature_knowledge_graph"
 ```
 
 One-record test:
 
 ```powershell
 python .\scripts\build_literature_knowledge_graph.py `
-  --records "E:\LiteratureAgent\lit_outputs\csv\all_records.csv" `
+  --records "<repo_root>\lit_outputs\csv\all_records.csv" `
   --ontology ".\config\perovskite_ontology_library_v19.json" `
-  --work-dir "E:\LiteratureAgent\lit_outputs" `
+  --work-dir "<repo_root>\lit_outputs" `
   --out ".\knowledge_graph_test" `
   --max-records 1
 ```
@@ -142,9 +146,6 @@ README.txt
 neo4j_import/
     nodes.csv
     relationships.csv
-portable/
-    graph.jsonl
-    literature_knowledge_graph.graphml
 reports/
     graph_summary.json
     node_counts_by_label.csv
@@ -169,12 +170,16 @@ plots/
     learned_scientific_relationships.png
 ```
 
+The `portable/` directory is not created by default. When
+`--portable-formats jsonl`, `graphml`, or both are supplied, it contains
+`graph.jsonl` and/or `literature_knowledge_graph.graphml`.
+
 ## POLARIS Integration
 
 For POLARIS, treat the graph builder as a separate resumable stage after
-`extract_batch` or `vision_pass`. The portable JSONL is convenient for agent
-tools, while the Neo4j CSVs are appropriate when a persistent graph database is
-available.
+`extract_batch` or `vision_pass`. Use the Neo4j CSVs when a persistent graph
+database is available. Request portable JSONL only when a specific agent tool
+or interchange workflow needs a file-based graph.
 
 Recommended agent queries include:
 

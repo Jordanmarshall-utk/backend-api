@@ -171,11 +171,328 @@ def _lazy_import_given_vars():
     return _given_vars
 
 
+_EVIDENCE_ANCHOR_RE = re.compile(r"(?is)\s*Evidence\s+anchor\s*:.*$")
+_EVIDENCE_CLAIM_RE = re.compile(r"\[(?:E|B|KG)\d+\]", re.IGNORECASE)
+_EVIDENCE_DOI_RE = re.compile(
+    r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE
+)
+_MONOVALENT_SPACER_RE = re.compile(
+    r"\b(?:PEA|CHA)\b|\b(?:phenethylammonium|cyclohexylammonium)\b",
+    re.IGNORECASE,
+)
+_DJ_TOPOLOGY_RE = re.compile(
+    r"\bDion[- ]Jacobson\b|\bDJ(?:-type|\s+(?:phase|structure|spacer))\b",
+    re.IGNORECASE,
+)
+_DIAMMONIUM_REQUEST_RE = re.compile(
+    r"\b(?:diammonium|diamine|dicationic|dication|divalent)\b", re.IGNORECASE
+)
+_KNOWN_MONOCATION_DJ_CANDIDATES = (
+    (
+        re.compile(r"\bN-methyl-2-aminoethanol\b|\bNMEA(?:\+|\u207a)?\b", re.IGNORECASE),
+        "N-methyl-2-aminoethanol has one protonatable amine and cannot supply the two "
+        "ammonium termini required for a diammonium DJ spacer.",
+    ),
+    (
+        re.compile(
+            r"\b4-fluoro(?:phenethylammonium|phenethylamine)\b|\b4-FPEA(?:\+|\u207a)?\b|"
+            r"\bphenethylammonium\b|\bPEA(?:\+|\u207a)?\b",
+            re.IGNORECASE,
+        ),
+        "4-fluorophenethylammonium/phenethylammonium is a monovalent phenethylammonium "
+        "spacer rather than a diammonium DJ linker.",
+    ),
+    (
+        re.compile(r"\bcyclohexylammonium\b|\bCHA(?:\+|\u207a)?\b", re.IGNORECASE),
+        "Cyclohexylammonium is monovalent and does not provide the two ammonium termini "
+        "required for a diammonium DJ linker.",
+    ),
+)
+_EXPLICIT_CHEMICAL_STRUCTURE_RE = re.compile(
+    r"\b(?:SMILES|InChI|molecular formula|structural formula|explicit structure)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_TWO_SITES_RE = re.compile(
+    r"\b(?:diammonium|diamine|two\s+(?:protonatable\s+)?(?:amines?|nitrogens?|sites?)|"
+    r"two\s+ammonium\s+termini|bis\s*\(\s*amino)",
+    re.IGNORECASE,
+)
+_EXPLICIT_DICATION_RE = re.compile(
+    r"(?:\b(?:net|intended|formal)?\s*2\s*\+(?!\w)|²⁺|\b(?:dication|diprotonated)\b)",
+    re.IGNORECASE,
+)
+
+
+def _active_request_requires_diammonium_dj() -> bool:
+    handoff = get_last_literature_handoff() or {}
+    request = str(handoff.get("query") or "")
+    return bool(
+        _DIAMMONIUM_REQUEST_RE.search(request)
+        and _DJ_TOPOLOGY_RE.search(request)
+    )
+
+
+def _guard_initial_diammonium_candidate(thought: str) -> tuple[str, bool]:
+    """Reject known monocations when the active request explicitly requires a DJ dication."""
+    if not _active_request_requires_diammonium_dj():
+        return str(thought or "").strip(), False
+    text = str(thought or "").strip()
+    for pattern, reason in _KNOWN_MONOCATION_DJ_CANDIDATES:
+        if pattern.search(text):
+            return (
+                "Candidate excluded from the requested diammonium DJ set: "
+                f"{reason} It may be retained only as an explicitly monovalent RP/passivation "
+                "comparator. Replace it with a chemically defined compound having two verified "
+                "protonatable amines, an intended diprotonated 2+ state, and an explicit structure "
+                "or SMILES before evaluating DJ formation.",
+                True,
+            )
+    return text, False
+
+
+def _guard_missing_dj_candidate_identity(thought: str) -> tuple[str, bool]:
+    """Withhold topology-specific branches that never identify a candidate."""
+    text = str(thought or "").strip()
+    if not _active_request_requires_diammonium_dj():
+        return text, False
+    has_identity_basis = bool(
+        _EXPLICIT_CHEMICAL_STRUCTURE_RE.search(text)
+        or _EXPLICIT_TWO_SITES_RE.search(text)
+        or _EXPLICIT_DICATION_RE.search(text)
+    )
+    if has_identity_basis:
+        return text, False
+    probe = re.sub(
+        r"(?is)^\s*\**(?:exploratory\s+hypothesis|novel\s+proposal|unverified\s+proposal)"
+        r"[^:]{0,220}:\**\s*",
+        "",
+        text,
+    ).lstrip("* _-")
+    unnamed_anaphora = re.match(
+        r"(?is)^(?:it|its|this|the)\s+(?:compact\s+shape|candidate|spacer|molecule|compound|"
+        r"proposal|structure|geometry)\b|^(?:it|its)\b",
+        probe,
+    )
+    if not unnamed_anaphora:
+        # A specific novel name can remain provisional. The downstream identity
+        # requirement will expose its missing structure, sites, and/or charge.
+        return text, False
+    return (
+        "Candidate definition required: this branch did not name a chemically identifiable "
+        "diamine or dication, so it cannot be evaluated as a diammonium DJ spacer. Regenerate "
+        "the option with a systematic chemical name, SMILES or molecular formula, two verified "
+        "protonatable sites, the intended diprotonated net 2+ state, and a commercial source. "
+        "Treat this branch as withheld rather than as a candidate.",
+        True,
+    )
+
+
+def _append_dj_identity_requirement(thought: str) -> str:
+    """Keep novel candidates, but expose missing structure/site/charge declarations."""
+    text = str(thought or "").strip()
+    if not _active_request_requires_diammonium_dj():
+        return text
+    missing: list[str] = []
+    if not _EXPLICIT_CHEMICAL_STRUCTURE_RE.search(text):
+        missing.append("a SMILES or molecular formula")
+    if not _EXPLICIT_TWO_SITES_RE.search(text):
+        missing.append("two verified protonatable amines")
+    if not _EXPLICIT_DICATION_RE.search(text):
+        missing.append("the intended diprotonated net 2+ state")
+    if not missing:
+        return text
+    return (
+        f"{text} Identity requirement before DJ assignment: provide "
+        + ", ".join(missing)
+        + "."
+    )
+
+
+def _strip_unverified_evidence_markers(thought: str) -> str:
+    """Remove an incomplete evidence anchor before labeling a thought unverified."""
+    cleaned = _EVIDENCE_ANCHOR_RE.sub("", str(thought or "")).strip()
+    cleaned = _EVIDENCE_CLAIM_RE.sub("", cleaned)
+    cleaned = _EVIDENCE_DOI_RE.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,;:-")
+
+    if _MONOVALENT_SPACER_RE.search(cleaned) and _DJ_TOPOLOGY_RE.search(cleaned):
+        return (
+            "Compare a chemically defined monovalent ammonium RP spacer with a "
+            "chemically defined divalent ammonium DJ spacer while controlling the "
+            "inorganic composition, layer number, processing, and interface position. "
+            "Test whether spacer connectivity changes defect passivation, ion migration, "
+            "and operational stability, treating every directional effect as an "
+            "unverified prediction."
+        )
+    return cleaned
+
+
+_DIRECT_EVIDENCE_COUNT_RE = re.compile(
+    r"Packet inventory:\s*(\d+)\s+direct claim", re.IGNORECASE
+)
+_CONTINUATION_EVIDENCE_SECTION_RE = re.compile(
+    r"(?is)\s*\**Evidence\s+anchor\s*:\**.*$"
+)
+_FORMAL_CHARGE_MUTATION_RE = re.compile(
+    r"(?is)\b(?:alter|modify|tweak|increase|decrease|reduce|change)\w*\b.{0,100}"
+    r"\b(?:divalenc\w*|formal charge|charge state)\b|"
+    r"\b(?:divalenc\w*|formal charge|charge state)\b.{0,100}"
+    r"\b(?:alter|modify|tweak|increase|decrease|reduce|change)\w*\b"
+)
+
+
+def _direct_evidence_count(evidence_context: str) -> int:
+    text = str(evidence_context or "")
+    match = _DIRECT_EVIDENCE_COUNT_RE.search(text)
+    if match:
+        return int(match.group(1))
+    return len(set(re.findall(r"(?m)^\[(E\d+)\]", text, flags=re.IGNORECASE)))
+
+
+def _selected_continuation_subject(selected_option: str) -> str:
+    excluded = {
+        "RP", "DJ", "PCE", "PL", "XRD", "AFM", "FTIR", "TOF", "SIMS",
+        "FAP", "LED", "UV", "VIS",
+    }
+    candidates = re.findall(
+        r"\b[A-Z]{2,8}(?:[\u00b2\u00b3]?\u207a|\d*\+)?",
+        str(selected_option or ""),
+    )
+    for candidate in candidates:
+        base = re.sub(r"[^A-Z]", "", candidate.upper())
+        if base and base not in excluded:
+            return candidate
+    return "selected"
+
+
+def _safe_ungrounded_continuations(selected_option: str) -> list[str]:
+    subject = _selected_continuation_subject(selected_option)
+    label = f"the selected {subject} proposal" if subject != "selected" else "the selected proposal"
+    return [
+        (
+            f"Unverified continuation (no direct supporting evidence retrieved): Does {label} "
+            "produce the claimed effect relative to matched controls, and which direct "
+            "measurement would falsify that effect?"
+        ),
+        (
+            f"Unverified continuation (no direct supporting evidence retrieved): Which "
+            f"measurement can distinguish the proposed mechanism of {label} from competing "
+            "explanations while composition, processing, and geometry are held constant?"
+        ),
+        (
+            f"Unverified continuation (no direct supporting evidence retrieved): Which fixed "
+            f"structural variables of {label}, such as linker length, rigidity, substitution, "
+            "or packing, can be varied while keeping chemical identity and formal charge "
+            "explicit and controlled?"
+        ),
+    ]
+
+
+def _selected_entity_terms(selected_option: str) -> set[str]:
+    text = str(selected_option or "")
+    terms = {
+        token.lower()
+        for token in re.findall(
+            r"\b([A-Z]{2,8})(?:[\u00b2\u00b3]?\u207a|\d*\+)?",
+            text,
+        )
+    }
+    terms -= {"rp", "dj", "pce", "pl", "xrd", "afm", "ftir", "tof", "sims", "fap"}
+    for match in re.findall(
+        r"([A-Za-z0-9,\-]+(?:amine|ammonium|diammonium|dication|cation))",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        normalized = re.sub(r"[^a-z0-9]", "", match.lower())
+        if len(normalized) >= 4:
+            terms.add(normalized)
+    return {term for term in terms if len(term) >= 3}
+
+
+def _evidence_claim_blocks(evidence_context: str) -> dict[str, str]:
+    text = str(evidence_context or "")
+    matches = list(re.finditer(r"(?m)^\[(E\d+)\]", text, flags=re.IGNORECASE))
+    blocks: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        blocks[match.group(1).upper()] = text[match.start():end]
+    return blocks
+
+
+def _property_terms(text: str) -> set[str]:
+    lowered = str(text or "").lower()
+    vocabulary = {
+        "ion migration", "charge transport", "mobility", "band alignment", "bandgap",
+        "recombination", "defect", "stability", "bonding", "carrier lifetime",
+        "photoluminescence", "crystallinity", "phase stability", "efficiency",
+    }
+    return {term for term in vocabulary if term in lowered}
+
+
+def _sanitize_ungrounded_continuation(option: str, fallback: str) -> str:
+    text = str(option or "").strip()
+    if _FORMAL_CHARGE_MUTATION_RE.search(text):
+        return fallback
+    text = _CONTINUATION_EVIDENCE_SECTION_RE.sub("", text)
+    text = _EVIDENCE_CLAIM_RE.sub("", text)
+    text = _EVIDENCE_DOI_RE.sub("", text)
+    text = re.sub(
+        r"(?i)^Why\s+is\s+(.+?)\s+expected\s+to\s+",
+        r"Does \1 ",
+        text,
+    )
+    text = re.sub(r"[ \t]{2,}", " ", text).strip(" ,;:-")
+    if not text:
+        return fallback
+    if not text.lower().startswith(("unverified continuation", "novel proposal")):
+        text = "Unverified continuation (no direct supporting evidence retrieved): " + text
+    return text
+
+
+def _gate_continuation_options(
+    options: list[str], selected_option: str, evidence_context: str
+) -> list[str]:
+    fallbacks = _safe_ungrounded_continuations(selected_option)
+    direct_count = _direct_evidence_count(evidence_context)
+    if direct_count <= 0:
+        logging.warning(
+            "Continuation evidence gate: no direct claims; removing all support anchors."
+        )
+        return fallbacks
+
+    entity_terms = _selected_entity_terms(selected_option)
+    claim_blocks = _evidence_claim_blocks(evidence_context)
+    gated: list[str] = []
+    for index, option in enumerate(list(options)[:3]):
+        text = str(option or "").strip()
+        invalid = bool(_FORMAL_CHARGE_MUTATION_RE.search(text))
+        anchors = re.findall(r"\[((?:E|B|KG)\d+)\]", text, flags=re.IGNORECASE)
+        if any(not anchor.upper().startswith("E") for anchor in anchors):
+            invalid = True
+        for anchor in [item.upper() for item in anchors if item.upper().startswith("E")]:
+            block = claim_blocks.get(anchor, "")
+            normalized_block = re.sub(r"[^a-z0-9]", "", block.lower())
+            if not block or (entity_terms and not any(term in normalized_block for term in entity_terms)):
+                invalid = True
+                break
+            option_properties = _property_terms(text)
+            block_properties = _property_terms(block)
+            if option_properties and not option_properties.intersection(block_properties):
+                invalid = True
+                break
+        gated.append(fallbacks[index] if invalid else text)
+    while len(gated) < 3:
+        gated.append(fallbacks[len(gated)])
+    return gated[:3]
+
+
 def get_local_literature_context(
     query: str,
     limit: int = 5,
     *,
     require_evidence: bool = False,
+    require_direct_support: bool = False,
+    retrieval_attempts: int = 3,
 ) -> str:
     """Retrieve local evidence and trigger a small literature job if evidence is thin."""
     try:
@@ -187,6 +504,9 @@ def get_local_literature_context(
             auto_expand_on_miss=True,
             min_items=1,
             retrieval_max_papers=3,
+            retrieval_timeout_seconds=120,
+            retrieval_attempts=retrieval_attempts,
+            require_strong_evidence=require_direct_support,
         )
         provenance = dict(packet.get("provenance") or {})
         _last_literature_handoff.set({
@@ -198,11 +518,17 @@ def get_local_literature_context(
             "retrieval_attempt_count": int(provenance.get("retrieval_attempt_count") or 0),
             "retrieval_attempts": provenance.get("retrieval_attempts") or [],
             "claim_count": int(provenance.get("claim_count") or 0),
+            "background_claim_count": int(provenance.get("background_claim_count") or 0),
             "claim_ids": provenance.get("claim_ids") or [],
             "source_ids": provenance.get("source_ids") or [],
             "controller_packet_path": provenance.get("controller_packet_path"),
             "background_retrieval_job": provenance.get("background_retrieval_job"),
             "background_retrieval_error": provenance.get("background_retrieval_error"),
+            "retrieval_query": provenance.get("retrieval_query") or query,
+            "evidence_gate_requirement": provenance.get("evidence_gate_requirement"),
+            "fresh_retrieval_required": bool(provenance.get("fresh_retrieval_required")),
+            "fresh_retrieval_performed": bool(provenance.get("fresh_retrieval_performed")),
+            "formatted_context": str(packet.get("formatted_context") or ""),
         })
         return packet.get("formatted_context", "Local LiteratureAgent evidence was unavailable.")
     except Exception as exc:
@@ -219,9 +545,75 @@ def get_last_literature_handoff() -> dict | None:
     return dict(value) if isinstance(value, dict) else None
 
 
+def set_last_literature_handoff(value: dict | None) -> None:
+    """Restore the session-persisted handoff at the start of a new API request."""
+    _last_literature_handoff.set(dict(value) if isinstance(value, dict) else None)
+
+
+def _normalized_evidence_scope(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _reuse_selected_branch_context(selected_scope: str) -> str:
+    handoff = get_last_literature_handoff() or {}
+    context = str(handoff.get("formatted_context") or "").strip()
+    prior_scope = _normalized_evidence_scope(
+        str(
+            handoff.get("selected_scope")
+            or handoff.get("retrieval_query")
+            or handoff.get("query")
+            or ""
+        )
+    )
+    selected = _normalized_evidence_scope(selected_scope)
+    if not context or not selected or not prior_scope:
+        return ""
+    if selected not in prior_scope and prior_scope not in selected:
+        return ""
+    handoff["used_for_hypothesis_synthesis"] = True
+    handoff["synthesis_reused_selected_branch_packet"] = True
+    _last_literature_handoff.set(handoff)
+    return context
+
+
+def _mark_synthesis_evidence_context(context: str) -> None:
+    handoff = get_last_literature_handoff() or {}
+    handoff["formatted_context"] = str(context or "")
+    handoff["used_for_hypothesis_synthesis"] = True
+    handoff.setdefault("synthesis_reused_selected_branch_packet", False)
+    _last_literature_handoff.set(handoff)
+
+
+def _merge_evidence_contexts(literature_context: str, *grounded_texts: str) -> str:
+    contexts = [str(literature_context or "").strip()]
+    for value in grounded_texts:
+        text = str(value or "")
+        marker = text.find("LITERATURE_KG_CONTEXT")
+        if marker < 0:
+            continue
+        kg_context = text[marker:]
+        boundary = kg_context.find("\n\nNOVELTY_BOUNDARY")
+        if boundary >= 0:
+            kg_context = kg_context[:boundary]
+        kg_context = kg_context.strip()
+        if kg_context and kg_context not in contexts:
+            contexts.append(kg_context)
+    return "\n\n".join(item for item in contexts if item)
+
+
 def _audit_and_store_literature_use(response: str, literature_context: str) -> dict:
-    claim_ids = list(dict.fromkeys(re.findall(r"\[(E\d+)\]", literature_context)))
-    source_ids = list(dict.fromkeys(re.findall(r"source=([^\n|]+)", literature_context)))
+    claim_ids = list(
+        dict.fromkeys(
+            re.findall(r"\[((?:E|B|KG)\d+)\]", literature_context, flags=re.IGNORECASE)
+        )
+    )
+    source_candidates = re.findall(r"source=([^\n|]+)", literature_context)
+    source_candidates.extend(
+        re.findall(r"(?im)^\s*DOI:\s*([^\s|)]+)", literature_context)
+    )
+    source_ids = list(
+        dict.fromkeys(item.strip().rstrip(".,;") for item in source_candidates if item.strip())
+    )
     response_lower = str(response or "").lower()
     used_claim_ids = [claim_id for claim_id in claim_ids if claim_id.lower() in response_lower]
     used_source_ids = [source_id for source_id in source_ids if source_id.lower() in response_lower]
@@ -386,37 +778,24 @@ Literature evidence contract:
 {literature_context}
 
 Keep the original hypothesis-agent behavior: produce useful Socratic questions
-and three exploratory lines of thought. When the packet contains numbered evidence
-claims, every thought that draws on literature MUST include an `Evidence anchor:`
-line naming at least one claim ID plus its DOI or paper_slug. Explain what the source
-supports and what remains inference. If the packet is weak or empty, say that briefly
-and continue with clearly labeled hypotheses.
+and three scientifically distinct exploratory lines of thought. When the packet
+contains numbered evidence claims, every thought that draws on literature MUST
+include an `Evidence anchor:` naming at least one claim ID plus its DOI or
+paper_slug. Explain what the source supports and what remains inference. If a
+thought is not directly supported by the packet, label it clearly as an
+exploratory or novel proposal rather than implying literature support.
 
-If a claim is labeled `partial_context_only`, preserve its experimental scope exactly.
-For example, concentration evidence is not chain-length evidence, and morphology evidence
-is not direct defect-density evidence. A named comparison material, spacer, composition,
-or derivative that is absent from both the user's question and the packet may still be
-proposed as a novel idea, but it MUST be labeled `Novel proposal - not supported by the
-retrieved packet` and must not be presented as a reported result. Explain why testing it
-would answer the question. Use a generic description when a specific identity is not
-scientifically necessary.
+For partial-context evidence, preserve the variable and experimental scope the
+source actually tested and add an `Evidence boundary:` stating what it did not
+test. Never attach a source to a different compound, mechanism, property, or
+relationship merely because it concerns the same broad material class. Do not
+invent citations, reported results, calculations, or numerical effect sizes.
 
-For every partial-context evidence anchor, include an `Evidence boundary:` sentence that
-states the variable the source actually tested and the requested variable it did not test.
-Never write that concentration/addition evidence "suggests" or demonstrates a chain-length
-relationship; that relationship may only appear as a labeled inference or novel proposal.
-
-Never claim that a named material, mechanism, calculation, experiment, or prior
-study supports a thought unless that support appears explicitly in the packet and
-you cite its DOI or paper_slug. Do not invent phrases such as "supported by DFT",
-"studies show", or "prior literature indicates". When direct support is absent,
-write exploratory possibilities as proposals that require testing.
-
-If the packet says there is no strong direct local support or that evidence is thin,
-do not introduce any named chemical, material, spacer, composition, abbreviation,
-acronym, or numerical result that is absent from both the user's question and the
-packet. Explore general variables, competing mechanisms, controls, and measurements
-instead. This restriction is mandatory even for speculative lines of thought.
+Define every proposed chemical identity unambiguously. In standard layered
+lead-halide perovskites, monovalent ammonium spacers are RP-type; a DJ assignment
+requires an appropriate divalent spacer linking adjacent inorganic slabs. Novel
+entities remain allowed, but must be labeled `Novel proposal - not supported by
+the retrieved packet` when absent from both the question and packet.
 
 Required format:
 ## Socratic Pass
@@ -444,31 +823,21 @@ Required format:
         if not llm_response or not str(llm_response).strip():
             raise ValueError("empty combined socratic/tot response")
 
-        use_audit = _audit_and_store_literature_use(str(llm_response), literature_context)
+        use_audit = _audit_and_store_literature_use(
+            str(llm_response), literature_context
+        )
         partial_context = "partial_context_only" in literature_context
         if (
-            (use_audit["available_claim_ids"] and not use_audit["evidence_packet_used"])
+            (use_audit["available_claim_ids"] and not use_audit["citation_complete"])
             or partial_context
         ):
             repair_prompt = f"""
-Revise the response below without changing its required section structure or core ideas.
-For each line of thought that uses literature, retain or add an `Evidence anchor:` sentence
-with the relevant claim ID and source identifier. Separate directly supported statements
-from proposed inference. Do not add facts or citations absent from the packet.
-
-This packet provides partial context only. For every named material, spacer, derivative,
-composition, acronym, or numerical result, determine whether it appears in the user's
-question or LiteratureAgent packet. If it does not, either replace it with a scientifically
-sufficient generic description or retain it only as an explicitly labeled `Novel proposal -
-not supported by the retrieved packet`. Do not attach an evidence anchor to imply support
-for that novel identity. Do not treat concentration evidence as chain-length evidence,
-morphology as direct defect-density evidence, or one intervention variable as proof of
-another. Preserve useful experimental proposals and uncertainty statements.
-Every partial-context evidence anchor MUST be followed by an `Evidence boundary:` sentence
-that names what the cited source actually tested and what it did not test. In particular,
-if the source varies PEAI concentration/addition rather than molecular chain length, state
-explicitly that it cannot establish a chain-length relationship. Rewrite any phrase saying
-that such evidence "suggests a chain-length correlation" as a separate proposed inference.
+Revise the response below without changing its section structure or core ideas.
+For each line of thought that uses literature, add an `Evidence anchor:` with a
+directly aligned [E#] claim and its DOI or paper_slug. Explain the evidence
+boundary and keep unsupported extensions explicitly labeled as novel proposals.
+Do not use [B#] or [KG#] as direct validation, and do not add facts, materials,
+results, or citations absent from the packet.
 
 LiteratureAgent packet:
 {literature_context}
@@ -497,14 +866,9 @@ Response to revise:
                 text,
                 flags=re.IGNORECASE,
             ).strip()
-        thoughts = _parse_tot_thoughts_from_text(text)
-
-        weak_local_evidence = (
-            "No strong direct local support" in literature_context
-            or "Local evidence was thin" in literature_context
+        thoughts = _finalize_initial_thoughts(
+            _parse_tot_thoughts_from_text(text), literature_context
         )
-        if weak_local_evidence:
-            thoughts = [_mark_unverified_exploration(thought) for thought in thoughts]
 
         substantial = [t for t in thoughts if t and len(str(t).strip()) > 20]
         if not soc_pass or len(substantial) < 3:
@@ -544,6 +908,68 @@ def _mark_unverified_exploration(thought: object) -> str:
     if removed_attribution:
         cleaned += " Any implied prior support was omitted because no DOI or paper_slug was supplied."
     return prefix + cleaned
+
+
+def _thought_has_complete_direct_anchor(thought: str, literature_context: str) -> bool:
+    """Require a packet [E#] identifier and that claim's source in the same thought."""
+    text = str(thought or "")
+    blocks = _evidence_claim_blocks(literature_context)
+    anchors = {
+        item.upper()
+        for item in re.findall(r"\[(E\d+)\]", text, flags=re.IGNORECASE)
+    }
+    lowered = text.lower()
+    for anchor in anchors:
+        block = blocks.get(anchor, "")
+        sources = re.findall(r"source=([^\n|]+)", block, flags=re.IGNORECASE)
+        sources.extend(
+            re.findall(r"(?im)^\s*DOI:\s*([^\s|)]+)", block)
+        )
+        if any(source.strip().rstrip(".,;").lower() in lowered for source in sources):
+            return True
+    return False
+
+
+def _finalize_initial_thoughts(
+    thoughts: list[object], literature_context: str
+) -> list[str]:
+    """Make evidence visibility deterministic for every initial thought."""
+    handoff = get_last_literature_handoff() or {}
+    direct_count = max(
+        int(handoff.get("strong_evidence_count") or 0),
+        _direct_evidence_count(literature_context),
+    )
+    finalized: list[str] = []
+    for value in list(thoughts)[:3]:
+        thought = str(value or "").strip()
+        if not thought:
+            finalized.append("")
+            continue
+        thought, topology_rejected = _guard_initial_diammonium_candidate(thought)
+        if topology_rejected:
+            finalized.append(thought)
+            continue
+        thought, identity_withheld = _guard_missing_dj_candidate_identity(thought)
+        if identity_withheld:
+            finalized.append(thought)
+            continue
+        thought = _append_dj_identity_requirement(thought)
+        already_unverified = thought.lower().startswith(
+            ("exploratory hypothesis", "novel proposal", "unverified")
+        )
+        if direct_count > 0 and _thought_has_complete_direct_anchor(
+            thought, literature_context
+        ):
+            finalized.append(thought)
+        elif already_unverified:
+            finalized.append(thought)
+        else:
+            cleaned = _strip_unverified_evidence_markers(thought)
+            finalized.append(_mark_unverified_exploration(cleaned))
+    while len(finalized) < 3:
+        finalized.append("")
+    _audit_and_store_literature_use("\n\n".join(finalized), literature_context)
+    return finalized[:3]
 
 
 def _parse_tot_thoughts_from_text(text: str) -> list:
@@ -845,7 +1271,11 @@ def tot_generation(socratic_pass_questioning: str, clarified_question: str, socr
 
         # If we have answers, use them; otherwise use questions
         reasoning_context = socratic_answers if socratic_answers else socratic_pass_questioning
-        literature_context = get_local_literature_context(clarified_question, limit=4)
+        literature_context = get_local_literature_context(
+            clarified_question,
+            limit=4,
+            require_evidence=False,
+        )
 
         tot_generation_prompt = f"""
         {TOT_INSTRUCTIONS}
@@ -854,8 +1284,11 @@ def tot_generation(socratic_pass_questioning: str, clarified_question: str, socr
         Evidence-grounded local literature packet:
         {literature_context}
 
-        Prefer lines of thought supported by the packet. Novel extrapolations are
-        allowed, but label them as hypotheses rather than established findings.
+        Prefer lines of thought directly supported by the packet. Every supported
+        statement must include an aligned [E#] evidence anchor plus its DOI or
+        paper_slug. Treat [B#] and [KG#] as background or analogy only. Novel
+        extrapolations remain allowed, but explicitly label them as unsupported
+        proposals rather than established findings. Do not invent citations.
         """
 
         if socratic_answers:
@@ -1034,7 +1467,9 @@ def tot_generation(socratic_pass_questioning: str, clarified_question: str, socr
         while len(final_thoughts) < 3:
             final_thoughts.append("")
 
-        return final_thoughts[:3]  # Return exactly 3 thoughts
+        return _finalize_initial_thoughts(
+            final_thoughts[:3], literature_context
+        )
 
     except Exception as e:
         import traceback
@@ -1070,6 +1505,11 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
         literature_context = get_local_literature_context(
             f"{initial_clarified_question}\nSelected continuation: {line_of_thought}",
             limit=4,
+            require_direct_support=True,
+            retrieval_attempts=2,
+        )
+        evidence_context = _merge_evidence_contexts(
+            literature_context, initial_clarified_question
         )
 
         tot_generation_prompt = f"""
@@ -1088,7 +1528,7 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
         {context_section}
 
         **LiteratureAgent evidence packet for this continuation:**
-        {literature_context}
+        {evidence_context}
 
         **FINAL REMINDER:**
         - The user selected the option above (the "SELECTED OPTION")
@@ -1097,10 +1537,15 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
         - Do NOT generate new TOT thoughts or start new directions
         - Do NOT ignore the selected option and generate unrelated thoughts
         - Build directly on the materials, mechanisms, or conditions mentioned in the selected option
-        - Ground at least one continuation in the packet when it contains a relevant numbered claim
-        - Any literature-grounded statement must include an `Evidence anchor:` with the claim ID and DOI or paper_slug
+        - Novel entities and mechanisms are allowed; preserve them as proposals rather than filtering them out
+        - If the selected option is unsupported, ask whether the proposed effect occurs and what would falsify it; do not convert the proposal into an established premise
+        - Define an invented or ambiguous chemical identity before making structure-based claims about its functional groups, protonation, bonding, or packing
+        - Ground a continuation only in a directly aligned [E#] claim that explicitly contains the same chemical entity, tested property, and reported relationship
+        - [B#] and [KG#] items may provide context or analogy, but they cannot support the selected compound or mechanism
+        - Any literature-grounded statement must include an `Evidence anchor:` with the aligned claim ID and DOI or paper_slug
         - Keep partial evidence within its tested scope; label unsupported extensions as `Novel proposal - not supported by the retrieved packet`
         - If the packet is unavailable, continue generating useful options but label them as unverified proposals
+        - In standard layered lead-halide perovskites, a monovalent ammonium spacer is RP-type; do not label it DJ unless an explicitly defined divalent linker is present
         """
 
         if reasoning_policy and reasoning_policy.strip().lower() not in ("none", "off", "disabled"):
@@ -1121,18 +1566,23 @@ def retry_thinking_deepen_thoughts(line_of_thought: str, previous_thought_1: str
         if llm_response is None:
             llm_response = ""
 
-        use_audit = _audit_and_store_literature_use(llm_response, literature_context)
-        if use_audit["available_claim_ids"] and not use_audit["citation_complete"]:
+        use_audit = _audit_and_store_literature_use(llm_response, evidence_context)
+        if (
+            _direct_evidence_count(evidence_context) > 0
+            and use_audit["available_claim_ids"]
+            and not use_audit["citation_complete"]
+        ):
             repair_prompt = f"""
 Revise the three continuation options below while preserving their direction and format.
-Ground at least one option in the supplied LiteratureAgent packet. Every literature-backed
-statement must include an `Evidence anchor:` naming a claim ID and its DOI or paper_slug.
+Ground an option only in a directly aligned [E#] claim from the supplied LiteratureAgent
+packet. Every literature-backed statement must include an `Evidence anchor:` naming that
+[E#] claim and its DOI or paper_slug. Never use [B#] or [KG#] as validation.
 Keep partial-context evidence within the variable actually tested. Clearly label all
 unsupported extensions as `Novel proposal - not supported by the retrieved packet`.
 Do not invent citations, results, materials, or numerical values.
 
 LiteratureAgent packet:
-{literature_context}
+{evidence_context}
 
 Continuation options to revise:
 {llm_response}
@@ -1140,7 +1590,7 @@ Continuation options to revise:
             repaired = generate_text_with_llm(repair_prompt)
             if repaired and repaired.strip():
                 llm_response = repaired
-                _audit_and_store_literature_use(llm_response, literature_context)
+                _audit_and_store_literature_use(llm_response, evidence_context)
 
         # Log the raw response for debugging
         logging.info(f"retry_thinking_deepen_thoughts raw response (first 1000 chars): {llm_response[:1000]}")
@@ -1445,6 +1895,8 @@ Continuation options to revise:
             if not options[i] or len(options[i].strip()) < 5:
                 options[i] = f"Option {i + 1}: Continue exploring this line of reasoning"
 
+        options = _gate_continuation_options(options, line_of_thought, evidence_context)
+
         # Log for debugging
         logging.info(
             f"retry_thinking_deepen_thoughts returning: {len(options)} continuation options (no socratic question for continuations)")
@@ -1485,16 +1937,29 @@ Continuation options to revise:
 
 
 def hypothesis_synthesis(socratic_question: str, next_step_option: str, previous_option_1: str,
-                         previous_option_2: str, conversation_context: str, reasoning_policy: str = "auto") -> str:
+                         previous_option_2: str, conversation_context: str, reasoning_policy: str = "auto",
+                         literature_context_override: str | None = None) -> str:
     # Produce hypothesis based on user selected thoughts and other information
     try:
         # Lazy import instructions
         instructions = _lazy_import_instructions()
         HYPOTHESIS_SYNTHESIS = instructions[5]
 
-        literature_context = get_local_literature_context(
-            f"{socratic_question}\n{next_step_option}\n{previous_option_1}\n{previous_option_2}",
-            limit=5,
+        literature_context = str(literature_context_override or "").strip()
+        if literature_context:
+            _mark_synthesis_evidence_context(literature_context)
+        else:
+            literature_context = _reuse_selected_branch_context(next_step_option)
+        if not literature_context:
+            literature_context = get_local_literature_context(
+                f"{socratic_question}\nSelected continuation: {next_step_option}",
+                limit=5,
+                require_direct_support=True,
+                retrieval_attempts=2,
+            )
+        _mark_synthesis_evidence_context(literature_context)
+        evidence_context = _merge_evidence_contexts(
+            literature_context, socratic_question, conversation_context
         )
         hypothesis_synthesis_prompt = f"""
             {HYPOTHESIS_SYNTHESIS}
@@ -1505,10 +1970,15 @@ def hypothesis_synthesis(socratic_question: str, next_step_option: str, previous
                 Previous Option 2: {previous_option_2}
             Full Conversation Context: {conversation_context}
             Evidence-grounded local literature packet:
-            {literature_context}
+            {evidence_context}
 
-            Ground the hypothesis in supplied evidence, preserve provenance identifiers,
-            and explicitly label any unsupported extrapolation as a proposed mechanism.
+            Preserve creative, novel proposals while separating them from evidence-supported claims.
+            Ground directly supported statements in supplied evidence and preserve provenance identifiers.
+            For a newly proposed chemical entity, state the intended identity or structural assumptions
+            before inferring behavior from functional groups, protonation, bonding, or packing. Label every
+            unsupported extrapolation as a proposed mechanism. An evidence anchor is relevant only when its
+            reported claim bears on the same property or mechanism; do not use an unrelated citation merely
+            because it concerns perovskites.
             """
 
         _wrapped = _generate_with_reasoning_wrapper(
@@ -1523,18 +1993,26 @@ def hypothesis_synthesis(socratic_question: str, next_step_option: str, previous
         if llm_response is None or not llm_response.strip():
             return "Error generating hypothesis. Please check your API key and try again."
 
-        use_audit = _audit_and_store_literature_use(llm_response, literature_context)
-        if use_audit["available_claim_ids"] and not use_audit["citation_complete"]:
+        use_audit = _audit_and_store_literature_use(llm_response, evidence_context)
+        if (
+            _direct_evidence_count(evidence_context) > 0
+            and use_audit["available_claim_ids"]
+            and not use_audit["citation_complete"]
+        ):
             repair_prompt = f"""
-Revise the hypothesis below without changing its core scientific proposal. Any statement
-presented as literature-supported must include an `Evidence anchor:` with a claim ID and
-its DOI or paper_slug from the supplied packet. Preserve the tested scope of partial
-evidence and add an `Evidence boundary:` where the source does not test the proposed
-variable directly. Keep novel ideas, but label them `Novel proposal - not supported by
-the retrieved packet`. Do not invent citations, facts, mechanisms, or numerical values.
+Revise the hypothesis below without changing its core scientific proposal. Only a directly
+aligned [E#] claim may support the selected compound and mechanism. Any statement presented
+as literature-supported must include that [E#] claim and its DOI or paper_slug. Never use
+[B#] or [KG#] as validation. Preserve the tested scope of partial
+            evidence and add an `Evidence boundary:` where the source does not test the proposed
+            variable directly. Keep novel ideas, but label them `Novel proposal - not supported by
+            the retrieved packet`. Novel entities may be invented, but their identity and structural
+            assumptions must be explicit and must not be attributed to a source that did not study them.
+            Remove evidence anchors that concern a different property or mechanism. Do not invent
+            citations, reported facts, or unsupported numerical effect sizes.
 
 LiteratureAgent packet:
-{literature_context}
+{evidence_context}
 
 Hypothesis to revise:
 {llm_response}
@@ -1542,7 +2020,7 @@ Hypothesis to revise:
             repaired = generate_text_with_llm(repair_prompt)
             if repaired and repaired.strip():
                 llm_response = repaired
-                _audit_and_store_literature_use(llm_response, literature_context)
+                _audit_and_store_literature_use(llm_response, evidence_context)
 
         return llm_response
 
@@ -1657,16 +2135,28 @@ and heuristic rubric evaluation.*
     }
 
 
-def local_hypothesis_analysis_fallback(hypothesis: str, socratic_question: str) -> str:
+def local_hypothesis_analysis_fallback(
+    hypothesis: str,
+    socratic_question: str,
+    literature_context_override: str | None = None,
+) -> str:
     try:
         # Lazy import instructions
         instructions = _lazy_import_instructions()
         HYPOTHESIS_ANALYSIS_REPORT = instructions[6]
 
-        literature_context = get_local_literature_context(
-            f"{socratic_question}\n{hypothesis}",
-            limit=5,
-        )
+        handoff = get_last_literature_handoff() or {}
+        literature_context = str(literature_context_override or "").strip()
+        if handoff.get("used_for_hypothesis_synthesis"):
+            literature_context = literature_context or str(handoff.get("formatted_context") or "").strip()
+            if literature_context:
+                handoff["analysis_reused_synthesis_packet"] = True
+                _last_literature_handoff.set(handoff)
+        if not literature_context:
+            literature_context = get_local_literature_context(
+                f"{socratic_question}\n{hypothesis}",
+                limit=5,
+            )
         hypothesis_analysis_report_prompt = f"""
         {HYPOTHESIS_ANALYSIS_REPORT}
         Hypothesis: {hypothesis}
@@ -1675,9 +2165,18 @@ def local_hypothesis_analysis_fallback(hypothesis: str, socratic_question: str) 
         Evidence-grounded local literature context:
         {literature_context}
 
-        Use the local literature context as supporting evidence. Distinguish direct
-        evidence from inference, retain DOI/paper identifiers when available, and do
-        not invent claims that are absent from the supplied context.
+        Evaluate the hypothesis without suppressing creative novelty. Distinguish direct evidence,
+        analogy, inference, and novel proposal, and retain DOI/paper identifiers when available.
+        Report novelty only relative to the retrieved packet unless a dedicated prior-art search supports
+        a broader claim. If a proposed chemical identity is new or ambiguous, require its intended structure,
+        formula, protonation state, and counterion before evaluating structure-based mechanisms.
+        Treat an evidence anchor as support only when the reported claim tests the same property or mechanism;
+        otherwise identify it as irrelevant or contextual rather than using it to raise plausibility.
+        Do not infer stronger bonding from reduced XRD spacing alone, defect density from AFM morphology alone,
+        or reduced nonradiative recombination from a longer PL lifetime alone. Do not praise an experimental
+        design as robust without controls and discriminating measurements. Remove arbitrary percentage targets
+        unless they are justified by prior data, measurement precision, or statistical power. Conclude with a
+        calibrated status such as evidence-supported, indirectly motivated, or speculative but testable.
         """
 
         _wrapped = _generate_with_reasoning_wrapper(
@@ -1694,3 +2193,268 @@ def local_hypothesis_analysis_fallback(hypothesis: str, socratic_question: str) 
     except Exception as e:
         logging.error(f"Hypothesis Analysis Report generation failed: {e}")
         return f"Error generating hypothesis analysis: {str(e)}. Please check your API key and try again."
+
+
+# POLARIS_HYPOTHESIS_OUTPUT_GUARD_V1
+from functools import wraps as _polaris_wraps
+
+try:
+    from app.tools.hypothesis_quality import guard_hypothesis_output as _polaris_guard_hypothesis_output
+except ImportError:
+    from hypothesis_quality import guard_hypothesis_output as _polaris_guard_hypothesis_output
+
+_polaris_original_hypothesis_synthesis = hypothesis_synthesis
+
+
+@_polaris_wraps(_polaris_original_hypothesis_synthesis)
+def hypothesis_synthesis(*args, **kwargs):
+    return _polaris_guard_hypothesis_output(
+        _polaris_original_hypothesis_synthesis(*args, **kwargs)
+    )
+
+
+from app.tools.hypothesis_scientific_guard import (
+    guard_hypothesis_analysis as _polaris_guard_hypothesis_analysis,
+    guard_hypothesis_synthesis as _polaris_guard_hypothesis_synthesis,
+    wrap_clean_model_output as _polaris_wrap_clean_model_output,
+)
+
+_polaris_scientific_original_synthesis = hypothesis_synthesis
+
+
+@_polaris_wraps(_polaris_scientific_original_synthesis)
+def hypothesis_synthesis(*args, **kwargs):
+    return _polaris_guard_hypothesis_synthesis(
+        _polaris_scientific_original_synthesis(*args, **kwargs)
+    )
+
+
+def _polaris_analysis_wrapper(function):
+    @_polaris_wraps(function)
+    def wrapped(*args, **kwargs):
+        context = "\n".join(
+            [*(str(value) for value in args), *(str(value) for value in kwargs.values())]
+        )
+        return _polaris_guard_hypothesis_analysis(function(*args, **kwargs), context)
+
+    return wrapped
+
+
+for _polaris_analysis_name in (
+    "hypothesis_analysis_report",
+    "generate_hypothesis_analysis_report",
+    "analyze_hypothesis",
+):
+    if callable(globals().get(_polaris_analysis_name)):
+        globals()[_polaris_analysis_name] = _polaris_analysis_wrapper(
+            globals()[_polaris_analysis_name]
+        )
+
+for _polaris_tot_name in (
+    "socratic_pass_and_tot",
+    "socratic_question_and_tot",
+    "tot_generation",
+):
+    if callable(globals().get(_polaris_tot_name)):
+        globals()[_polaris_tot_name] = _polaris_wrap_clean_model_output(
+            globals()[_polaris_tot_name]
+        )
+
+# Final-report live quality control is intentionally bounded to one report edit.
+try:
+    import functools as _quality_functools
+    import inspect as _quality_inspect
+    import logging as _quality_logging
+
+    from app.services.hypothesis_quality_control import (
+        run_hypothesis_quality_cycle as _run_hypothesis_quality_cycle,
+    )
+
+    _quality_logger = _quality_logging.getLogger(__name__)
+    _analyze_hypothesis_before_live_quality = globals().get("analyze_hypothesis")
+
+    def _quality_model_adapter(policy_name, memory):
+        def _call(prompt):
+            helper = globals().get("_generate_with_reasoning_wrapper")
+            if not callable(helper):
+                raise RuntimeError("Reasoning-aware generation helper is unavailable")
+
+            signature = _quality_inspect.signature(helper)
+            values = {}
+            unsupported = []
+            for name, parameter in signature.parameters.items():
+                lowered = name.lower()
+                if parameter.kind in (
+                    _quality_inspect.Parameter.VAR_POSITIONAL,
+                    _quality_inspect.Parameter.VAR_KEYWORD,
+                ):
+                    continue
+                if "prompt" in lowered or lowered in {"message", "input", "text"}:
+                    values[name] = prompt
+                elif "policy" in lowered or "philosoph" in lowered:
+                    values[name] = policy_name
+                elif "task" in lowered or lowered in {"stage", "agent_name"}:
+                    values[name] = "hypothesis_quality_control"
+                elif "memory" in lowered or lowered in {"state", "manager"}:
+                    values[name] = memory
+                elif lowered in {"function", "func", "generator", "base_function"}:
+                    values[name] = _analyze_hypothesis_before_live_quality
+                elif parameter.default is _quality_inspect.Parameter.empty:
+                    unsupported.append(name)
+            if unsupported:
+                raise TypeError(
+                    "Unsupported reasoning helper parameters: " + ", ".join(unsupported)
+                )
+
+            result = helper(**values)
+            if callable(result):
+                result = result(prompt)
+            if isinstance(result, dict):
+                result = (
+                    result.get("response")
+                    or result.get("content")
+                    or result.get("text")
+                    or result.get("output")
+                )
+            if not isinstance(result, str) or not result.strip():
+                raise RuntimeError("Reasoning-aware generation returned no text")
+            return result
+
+        return _call
+
+    if callable(_analyze_hypothesis_before_live_quality):
+
+        @_quality_functools.wraps(_analyze_hypothesis_before_live_quality)
+        def analyze_hypothesis(*args, **kwargs):
+            report = _analyze_hypothesis_before_live_quality(*args, **kwargs)
+            if not isinstance(report, str) or report.lstrip().lower().startswith("error"):
+                return report
+
+            context_parts = [str(value) for value in args if value is not None]
+            context_parts.extend(
+                f"{key}: {value}" for key, value in kwargs.items() if value is not None
+            )
+            hypothesis_context = "\n\n".join(context_parts)
+            memory = None
+            try:
+                from app.services.memory_service import get_memory_manager
+
+                memory = get_memory_manager()
+            except Exception:
+                _quality_logger.debug(
+                    "Hypothesis quality control could not access shared memory",
+                    exc_info=True,
+                )
+
+            try:
+                enabled = True
+                if memory is not None:
+                    enabled = bool(
+                        memory.get_var("hypothesis_live_auditor_enabled", True)
+                    )
+                if not enabled:
+                    return report
+                final_report, _ = _run_hypothesis_quality_cycle(
+                    report=report,
+                    hypothesis_context=hypothesis_context,
+                    auditor_llm=_quality_model_adapter("humean_evidence", memory),
+                    editor_llm=_quality_model_adapter("kantian_constraints", memory),
+                    memory=memory,
+                )
+                return final_report
+            except Exception:
+                _quality_logger.warning(
+                    "Hypothesis live quality control failed; returning the guarded report",
+                    exc_info=True,
+                )
+                return report
+except Exception:
+    logging.getLogger(__name__).warning(
+        "Hypothesis live quality control registration failed", exc_info=True
+    )
+
+
+# The streaming Hypothesis workflow uses the local analysis fallback directly.
+try:
+    import functools as _live_quality_functools
+    import logging as _live_quality_logging
+
+    from app.services.hypothesis_quality_control import (
+        run_hypothesis_quality_cycle as _run_live_hypothesis_quality_cycle,
+    )
+
+    _live_quality_logger = _live_quality_logging.getLogger(__name__)
+    _local_analysis_before_live_quality = globals().get(
+        "local_hypothesis_analysis_fallback"
+    )
+
+    if callable(_local_analysis_before_live_quality):
+
+        @_live_quality_functools.wraps(_local_analysis_before_live_quality)
+        def local_hypothesis_analysis_fallback(*args, **kwargs):
+            report = _local_analysis_before_live_quality(*args, **kwargs)
+            if not isinstance(report, str) or report.lstrip().lower().startswith("error"):
+                return report
+
+            context_parts = [str(value) for value in args if value is not None]
+            context_parts.extend(
+                f"{key}: {value}" for key, value in kwargs.items() if value is not None
+            )
+            memory = None
+            try:
+                from app.services.memory_service import get_memory_manager
+
+                memory = get_memory_manager()
+                view_component = getattr(memory, "view_component", None)
+                if callable(view_component):
+                    for component in (
+                        "initial_question",
+                        "clarified_question",
+                        "last_selected_option",
+                    ):
+                        value = view_component(component)
+                        if value:
+                            context_parts.append(f"{component}: {value}")
+            except Exception:
+                _live_quality_logger.debug(
+                    "Live Hypothesis quality control could not access shared memory",
+                    exc_info=True,
+                )
+
+            try:
+                enabled = True
+                if memory is not None:
+                    enabled = bool(
+                        memory.get_var("hypothesis_live_auditor_enabled", True)
+                    )
+                if not enabled:
+                    return report
+                adapter = globals().get("_quality_model_adapter")
+                auditor_llm = adapter("humean_evidence", memory) if callable(adapter) else None
+                editor_llm = adapter("kantian_constraints", memory) if callable(adapter) else None
+                final_report, _ = _run_live_hypothesis_quality_cycle(
+                    report=report,
+                    hypothesis_context="\n\n".join(context_parts),
+                    auditor_llm=auditor_llm,
+                    editor_llm=editor_llm,
+                    memory=memory,
+                )
+                return final_report
+            except Exception:
+                _live_quality_logger.warning(
+                    "Live Hypothesis quality control failed; returning the guarded report",
+                    exc_info=True,
+                )
+                return report
+except Exception:
+    logging.getLogger(__name__).warning(
+        "Live Hypothesis quality-control registration failed", exc_info=True
+    )
+
+
+from app.services.hypothesis_branch_grounding import (
+    install_hypothesis_grounding as _install_hypothesis_grounding,
+)
+
+_install_hypothesis_grounding(globals())
+del _install_hypothesis_grounding

@@ -801,14 +801,18 @@ class GraphBuilder:
             self.add_paper_knowledge(paper_id, paper_slug, record_id)
             self.processed_papers.add(paper_id)
 
-    def write(self, out_dir: Path) -> None:
+    def write(self, out_dir: Path, portable_formats: Sequence[str] = ()) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
+        portable_formats = tuple(dict.fromkeys(portable_formats))
         neo4j_dir = out_dir / "neo4j_import"
         portable_dir = out_dir / "portable"
         reports_dir = out_dir / "reports"
         views_dir = out_dir / "derived_views"
         plots_dir = out_dir / "plots"
-        for path in [neo4j_dir, portable_dir, reports_dir, views_dir, plots_dir]:
+        output_dirs = [neo4j_dir, reports_dir, views_dir, plots_dir]
+        if portable_formats:
+            output_dirs.append(portable_dir)
+        for path in output_dirs:
             path.mkdir(parents=True, exist_ok=True)
 
         node_rows = []
@@ -835,31 +839,33 @@ class GraphBuilder:
         pd.DataFrame(node_rows).to_csv(neo4j_dir / "nodes.csv", index=False)
         pd.DataFrame(edge_rows).to_csv(neo4j_dir / "relationships.csv", index=False)
 
-        with (portable_dir / "graph.jsonl").open("w", encoding="utf-8") as handle:
-            for node in self.nodes.values():
-                serial = {**node, "labels": sorted(node["labels"])}
-                handle.write(json_text({"kind": "node", **serial}) + "\n")
-            for edge in self.edges.values():
-                handle.write(json_text({"kind": "relationship", **edge}) + "\n")
+        if "jsonl" in portable_formats:
+            with (portable_dir / "graph.jsonl").open("w", encoding="utf-8") as handle:
+                for node in self.nodes.values():
+                    serial = {**node, "labels": sorted(node["labels"])}
+                    handle.write(json_text({"kind": "node", **serial}) + "\n")
+                for edge in self.edges.values():
+                    handle.write(json_text({"kind": "relationship", **edge}) + "\n")
 
-        graph = nx.MultiDiGraph()
-        for node in self.nodes.values():
-            graph.add_node(
-                node["node_id"],
-                labels=xml_safe(";".join(sorted(node["labels"]))),
-                name=xml_safe(node.get("name", "")),
-                properties_json=xml_safe(json_text({k: v for k, v in node.items() if k not in {"node_id", "labels", "name"}})),
-            )
-        for edge in self.edges.values():
-            graph.add_edge(
-                edge["start_id"],
-                edge["end_id"],
-                key=edge["relationship_id"],
-                type=xml_safe(edge["type"]),
-                source_field=xml_safe(edge.get("source_field", "")),
-                source_record_id=xml_safe(edge.get("source_record_id", "")),
-            )
-        nx.write_graphml(graph, portable_dir / "literature_knowledge_graph.graphml")
+        if "graphml" in portable_formats:
+            graph = nx.MultiDiGraph()
+            for node in self.nodes.values():
+                graph.add_node(
+                    node["node_id"],
+                    labels=xml_safe(";".join(sorted(node["labels"]))),
+                    name=xml_safe(node.get("name", "")),
+                    properties_json=xml_safe(json_text({k: v for k, v in node.items() if k not in {"node_id", "labels", "name"}})),
+                )
+            for edge in self.edges.values():
+                graph.add_edge(
+                    edge["start_id"],
+                    edge["end_id"],
+                    key=edge["relationship_id"],
+                    type=xml_safe(edge["type"]),
+                    source_field=xml_safe(edge.get("source_field", "")),
+                    source_record_id=xml_safe(edge.get("source_record_id", "")),
+                )
+            nx.write_graphml(graph, portable_dir / "literature_knowledge_graph.graphml")
 
         node_counts = Counter(label for node in self.nodes.values() for label in node["labels"])
         rel_counts = Counter(edge["type"] for edge in self.edges.values())
@@ -870,6 +876,7 @@ class GraphBuilder:
         learned_edges = [edge for edge in self.edges.values() if edge["type"] in LEARNED_RELATION_TYPES]
         summary = {
             "graph_model": "evidence-grounded claim-centered scientific property graph",
+            "portable_formats": list(portable_formats),
             "nodes": len(self.nodes),
             "relationships": len(self.edges),
             "scientific_claims": len(claim_nodes),
@@ -1068,6 +1075,15 @@ class GraphBuilder:
             fig.savefig(plots_dir / "learned_scientific_relationships.png", bbox_inches="tight")
             plt.close(fig)
 
+        portable_readme_lines = []
+        if "jsonl" in portable_formats:
+            portable_readme_lines.append("- portable/graph.jsonl")
+        if "graphml" in portable_formats:
+            portable_readme_lines.append("- portable/literature_knowledge_graph.graphml")
+        portable_readme = "\n".join(portable_readme_lines)
+        if not portable_readme:
+            portable_readme = "- No portable export requested for this build."
+
         readme = f"""LiteratureAgent Knowledge Graph
 ================================
 
@@ -1097,12 +1113,17 @@ Open first:
 - reports/claims_without_linked_evidence.csv
 - neo4j_import/nodes.csv
 - neo4j_import/relationships.csv
-- portable/literature_knowledge_graph.graphml
 - derived_views/sankey_schema_flows.csv
 - derived_views/material_process_performance_dag_edges.csv
 - derived_views/learned_scientific_relationships.csv
 - derived_views/cross_paper_relationship_patterns.csv
 - derived_views/paper_knowledge_cards.jsonl
+
+Portable exports:
+{portable_readme}
+
+Portable JSONL and GraphML are optional. Use `--portable-formats` only when an
+external consumer specifically requires one of them.
 
 Neo4j import:
 The CSV files use Neo4j bulk-import headers (:ID, :LABEL, :START_ID, :END_ID, :TYPE).
@@ -1119,6 +1140,13 @@ def main() -> None:
     parser.add_argument("--work-dir", required=True, help="LiteratureAgent output directory containing evidence artifacts")
     parser.add_argument("--out", required=True, help="Knowledge-graph output directory")
     parser.add_argument("--max-records", type=int, default=0, help="Optional test limit; 0 processes all records")
+    parser.add_argument(
+        "--portable-formats",
+        nargs="*",
+        choices=("jsonl", "graphml"),
+        default=(),
+        help="Optional portable exports. The default build writes none.",
+    )
     args = parser.parse_args()
 
     records_path = Path(args.records)
@@ -1131,7 +1159,7 @@ def main() -> None:
     builder = GraphBuilder(ontology_index(ontology_path), records_path, work_dir)
     for row_index, row in df.iterrows():
         builder.add_record(row, int(row_index))
-    builder.write(out_dir)
+    builder.write(out_dir, args.portable_formats)
     print(f"Knowledge graph written to: {out_dir.resolve()}")
     print(f"Nodes: {len(builder.nodes):,} | Relationships: {len(builder.edges):,}")
 

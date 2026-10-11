@@ -22,6 +22,7 @@ RUNTIME_KEYS = frozenset({
     "cf_composition_file",
     "experiment_memory",
     "metrics_prev",
+    "last_literature_handoff",
 })
 
 _runtime: Dict[str, Any] = {}

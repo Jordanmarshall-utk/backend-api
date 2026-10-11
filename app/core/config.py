@@ -1,6 +1,7 @@
 from functools import lru_cache
-from typing import List
+from typing import List, Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,9 +32,49 @@ class Settings(BaseSettings):
     literature_mcp_endpoint: str = "http://127.0.0.1:8000/mcp"
     watcher_port: int = 8765
 
+    # The public MCP transport is opt-in. ``local`` permits only loopback
+    # clients; ``authenticated`` requires the same Supabase bearer token as
+    # the REST API and fails closed while REST authentication is disabled.
+    mcp_enabled: bool = False
+    mcp_access_mode: Literal["local", "authenticated"] = "local"
+    mcp_allowed_hosts: str = ""
+    mcp_allowed_origins: str = ""
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def _coerce_debug(cls, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "y", "t"}:
+                return True
+            if normalized in {
+                "0",
+                "false",
+                "off",
+                "no",
+                "n",
+                "f",
+                "release",
+                "prod",
+                "production",
+                "disabled",
+            }:
+                return False
+        return value
+
     @property
     def cors_origin_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def mcp_allowed_host_list(self) -> List[str]:
+        return [item.strip() for item in self.mcp_allowed_hosts.split(",") if item.strip()]
+
+    @property
+    def mcp_allowed_origin_list(self) -> List[str]:
+        return [item.strip() for item in self.mcp_allowed_origins.split(",") if item.strip()]
 
 
 @lru_cache

@@ -11,12 +11,18 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-PCE_TARGETS = ["JV_default_PCE", "JV_reverse_scan_PCE", "JV_forward_scan_PCE"]
+PCE_TARGETS = ["JV_default_PCE", "JV_reverse_scan_PCE", "JV_forward_scan_PCE", "Stabilised_performance_PCE"]
 COMPOSITION_FIELDS = ["Perovskite_composition_long_form", "Perovskite_composition_short_form"]
 DEVICE_FIELDS = ["Cell_architecture", "ETL_stack_sequence", "HTL_stack_sequence", "Backcontact_stack_sequence"]
 PROCESS_FIELDS = [
     "Perovskite_deposition_procedure",
     "Perovskite_deposition_aggregation_state_of_reactants",
+    "Perovskite_deposition_solvents",
+    "Perovskite_deposition_solvents_mixing_ratios",
+    "Perovskite_deposition_quenching_induced_crystallisation",
+    "Perovskite_deposition_quenching_media",
+    "Perovskite_deposition_thermal_annealing_temperature",
+    "Perovskite_deposition_thermal_annealing_time",
     "Perovskite_annealing_temperature",
 ]
 STABILITY_TARGETS = [
@@ -63,20 +69,33 @@ def _numeric_present(df: pd.DataFrame, names: list[str], low: float | None = Non
 
 def eligibility(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
-    out["pce_target_available"] = _numeric_present(df, PCE_TARGETS, 0, 40)
+    out["pce_target_available"] = _numeric_present(df, PCE_TARGETS, 0.01, 40)
     out["composition_available"] = _present(df, COMPOSITION_FIELDS)
     out["device_available"] = _present(df, DEVICE_FIELDS)
     out["processing_available"] = _present(df, PROCESS_FIELDS)
-    out["pce_model_ready_minimal"] = out["pce_target_available"] & out["composition_available"]
+    out["pce_model_usable_target"] = out["pce_target_available"]
+    out["pce_context_partial"] = out["pce_target_available"] & (
+        out["composition_available"] | out["device_available"] | out["processing_available"]
+    )
+    out["pce_model_ready_minimal"] = out["pce_target_available"] & (
+        out["composition_available"] | out["device_available"]
+    )
     out["pce_model_ready_strict"] = (
-        out["pce_model_ready_minimal"] & out["device_available"] & out["processing_available"]
+        out["pce_target_available"]
+        & out["composition_available"]
+        & out["device_available"]
+        & out["processing_available"]
     )
 
     out["stability_target_available"] = _numeric_present(df, STABILITY_TARGETS, 0)
     out["stability_time_available"] = _numeric_present(df, STABILITY_TIME_FIELDS, 0)
     out["stability_conditions_available"] = _present(df, STABILITY_CONDITION_FIELDS)
+    out["stability_model_usable_target"] = out["stability_target_available"] & (
+        out["stability_time_available"] | _numeric_present(df, ["Stability_PCE_after_1000_h"], 0)
+    )
     out["stability_model_ready_minimal"] = (
-        out["stability_target_available"] & out["stability_time_available"] & out["composition_available"]
+        out["stability_model_usable_target"]
+        & (out["composition_available"] | out["device_available"] | out["stability_conditions_available"])
     )
     out["stability_model_ready_strict"] = (
         out["stability_model_ready_minimal"] & out["device_available"] & out["stability_conditions_available"]

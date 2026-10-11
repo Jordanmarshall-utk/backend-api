@@ -1,9 +1,14 @@
+import logging
 from typing import Any, Dict, Optional
 
 from app.core.session import SessionContext
 from app.services.agent_headless import run_agent_headless
 from app.services.agent_registry import build_agent_router, resolve_agent_by_name
 from app.services.memory_service import get_memory_manager
+from app.services.reasoning_integration import prepare_pipeline_reasoning
+
+
+_logger = logging.getLogger(__name__)
 
 
 def _apply_experiment(memory: Any, experiment_id: Optional[int]) -> None:
@@ -33,6 +38,17 @@ def run_named_agent(
         }
 
     display_name = getattr(selected, "name", agent_name)
+    reasoning = None
+    if "hypothesis" not in str(display_name).lower():
+        try:
+            body, reasoning = prepare_pipeline_reasoning(
+                memory,
+                str(display_name),
+                payload=body,
+                requested_policy=str(body.get("reasoning_policy") or "auto"),
+            )
+        except Exception as exc:
+            _logger.warning("Reasoning Council integration failed for %s: %s", display_name, exc)
     try:
         data = run_agent_headless(selected, memory, body)
         if not isinstance(data, dict):
@@ -43,12 +59,21 @@ def run_named_agent(
         message = data.get("message") or (
             "Agent completed." if status == "success" else "Agent could not run."
         )
-        payload = {k: v for k, v in data.items() if k not in ("status", "message")}
+        response_payload = {k: v for k, v in data.items() if k not in ("status", "message")}
+        if reasoning is not None:
+            response_payload["reasoning"] = {
+                "policy": reasoning.effective_policy,
+                "plan": reasoning.plan.model_dump(mode="json"),
+                "context_applied": bool(reasoning.context),
+                "reasoning_required": reasoning.plan.reasoning_required,
+                "selection_source": reasoning.plan.selection_source,
+                "fallback_used": reasoning.plan.fallback_used,
+            }
         return {
             "agent": display_name,
             "status": status,
             "message": message,
-            "data": payload,
+            "data": response_payload,
             "nextAgent": None,
         }
     except Exception as exc:

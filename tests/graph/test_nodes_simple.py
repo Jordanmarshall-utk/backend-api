@@ -54,9 +54,10 @@ async def test_ml_models_node_sets_has_ml_results():
     from app.graph.nodes.ml_models import ml_models_node
     memory = MagicMock()
     memory.get_var.return_value = {"gp_model": "fitted"}
-    mock_agent = MagicMock()
-    mock_agent.run_agent.return_value = {"status": "success", "gp_results": {"gp_model": "fitted"}}
+    mock_run = MagicMock(
+        return_value={"status": "success", "result": {"gp_model": "fitted"}}
+    )
     with patch("app.graph.nodes.ml_models.get_memory_manager", return_value=memory), \
-         patch("app.graph.nodes.ml_models.MLModelsAgent", return_value=mock_agent):
+         patch("app.graph.nodes.ml_models.run_ml_automation", mock_run):
         result = await ml_models_node(_state(), {})
     assert result["has_ml_results"] is True

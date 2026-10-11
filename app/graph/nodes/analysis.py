@@ -10,6 +10,7 @@ from langchain_core.runnables import RunnableConfig
 from app.graph.state import PolarisGraphState
 from app.services.analysis_service import run_analysis_pipeline
 from app.services.memory_service import get_memory_manager
+from app.services.reasoning_integration import reasoning_context_for_stage
 from app.tools.memory_adapter import MemoryAdapter
 
 _logger = logging.getLogger(__name__)
@@ -23,8 +24,14 @@ async def _gather_context_node(state: PolarisGraphState, config: RunnableConfig)
 async def _run_analysis_node(state: PolarisGraphState, config: RunnableConfig) -> PolarisGraphState:
     memory = get_memory_manager()
     try:
-        result = run_analysis_pipeline(memory)
-        analysis = result.get("analysis") if isinstance(result, dict) else None
+        result = run_analysis_pipeline(
+            memory,
+            {
+                "action": "run",
+                "reasoning_context": reasoning_context_for_stage(memory, "analysis"),
+            },
+        )
+        analysis = result.get("analysis_report") if isinstance(result, dict) else None
     except Exception as exc:
         _logger.warning("run_analysis_pipeline failed: %s", exc)
         analysis = None

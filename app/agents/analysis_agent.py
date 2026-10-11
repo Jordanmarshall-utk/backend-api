@@ -360,7 +360,7 @@ class AnalysisAgent(BaseAgent):
         - Impact assessment
         """
         parsed = {
-            "hypothesis_status": "unknown",  # "confirmed", "needs_revision", "rejected", "needs_more_data"
+            "hypothesis_status": "unknown",
             "more_experiments_needed": False,
             "experiment_recommendations": [],
             "literature_explanations": "",
@@ -368,16 +368,17 @@ class AnalysisAgent(BaseAgent):
             "key_findings": []
         }
         
-        # Simple parsing - look for key phrases
         analysis_lower = analysis_text.lower()
         
         # Check hypothesis status
-        if "hypothesis is confirmed" in analysis_lower or "hypothesis is supported" in analysis_lower:
-            parsed["hypothesis_status"] = "confirmed"
+        if "not tested" in analysis_lower or "not physically validated" in analysis_lower:
+            parsed["hypothesis_status"] = "not_tested"
+        elif "hypothesis is not supported" in analysis_lower:
+            parsed["hypothesis_status"] = "not_supported"
+        elif "hypothesis is supported" in analysis_lower or "supported by current data" in analysis_lower:
+            parsed["hypothesis_status"] = "supported"
         elif "hypothesis needs revision" in analysis_lower or "hypothesis should be modified" in analysis_lower:
             parsed["hypothesis_status"] = "needs_revision"
-        elif "hypothesis is rejected" in analysis_lower or "hypothesis is not supported" in analysis_lower:
-            parsed["hypothesis_status"] = "rejected"
         elif "more data" in analysis_lower or "additional experiments" in analysis_lower:
             parsed["hypothesis_status"] = "needs_more_data"
         
@@ -385,29 +386,66 @@ class AnalysisAgent(BaseAgent):
         if "more experiments" in analysis_lower or "additional experiments" in analysis_lower:
             parsed["more_experiments_needed"] = True
         
-        # Extract experiment recommendations (look for numbered lists or bullet points)
+        # Extract complete recommendations from an explicit Markdown section.
         import re
-        exp_patterns = [
-            r"experiment.*?:?\s*(.+?)(?:\n|$)",
-            r"recommend.*?:?\s*(.+?)(?:\n|$)",
-            r"should.*?:?\s*(.+?)(?:\n|$)"
-        ]
-        for pattern in exp_patterns:
-            matches = re.findall(pattern, analysis_text, re.IGNORECASE | re.MULTILINE)
-            if matches:
-                parsed["experiment_recommendations"].extend(matches[:3])  # Limit to 3
+
+        def markdown_section(*headings: str) -> str:
+            alternatives = "|".join(re.escape(heading) for heading in headings)
+            match = re.search(
+                rf"(?ims)^#{{1,6}}\s*(?:{alternatives})\s*:?\s*$\n"
+                rf"(.*?)(?=^#{{1,6}}\s|\Z)",
+                analysis_text,
+            )
+            return match.group(1).strip() if match else ""
+
+        recommendation_section = markdown_section(
+            "Recommended Compositions / Next Experiments",
+            "Recommended Next Experiments",
+            "Next Experiments",
+            "Experimental Recommendations",
+            "Recommendations",
+        )
+        recommendations: list[str] = []
+        current = ""
+        for raw_line in recommendation_section.splitlines():
+            item = re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)(.+?)\s*$", raw_line)
+            if item:
+                if current:
+                    recommendations.append(current)
+                current = item.group(1).strip()
+            elif current and raw_line[:1].isspace() and raw_line.strip():
+                current = f"{current} {raw_line.strip()}"
+        if current:
+            recommendations.append(current)
+
+        if not recommendations and recommendation_section:
+            action = re.compile(
+                r"(?i)^(?:test|measure|compare|repeat|validate|evaluate|collect|run|perform|"
+                r"synthesize|characterize|investigate|use|include|control)\b"
+            )
+            for paragraph in re.split(r"\n\s*\n", recommendation_section):
+                candidate = " ".join(paragraph.split())
+                if len(candidate) >= 20 and action.match(candidate):
+                    recommendations.append(candidate)
+        parsed["experiment_recommendations"] = recommendations[:5]
         
         # Extract literature explanations (look for "literature" or "research" sections)
-        lit_pattern = r"(?:literature|research|previous studies|according to).*?:(.+?)(?=\n\n|\n##|$)"
-        lit_matches = re.findall(lit_pattern, analysis_text, re.IGNORECASE | re.DOTALL)
-        if lit_matches:
-            parsed["literature_explanations"] = lit_matches[0][:1000]  # Limit length
+        literature_section = markdown_section(
+            "Literature Grounding",
+            "Literature Context",
+            "Research Context",
+        )
+        if literature_section:
+            parsed["literature_explanations"] = literature_section[:1000]
         
         # Extract impact assessment
-        impact_pattern = r"(?:impact|implications|significance).*?:(.+?)(?=\n\n|\n##|$)"
-        impact_matches = re.findall(impact_pattern, analysis_text, re.IGNORECASE | re.DOTALL)
-        if impact_matches:
-            parsed["impact_assessment"] = impact_matches[0][:1000]  # Limit length
+        impact_section = markdown_section(
+            "Impact Assessment",
+            "Implications",
+            "Significance",
+        )
+        if impact_section:
+            parsed["impact_assessment"] = impact_section[:1000]
         
         return parsed
     

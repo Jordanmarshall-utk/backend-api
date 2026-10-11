@@ -18,9 +18,34 @@ from app.graph.nodes.ml_models import ml_models_node
 from app.graph.nodes.watcher import watcher_node
 from app.graph.state import PolarisGraphState
 from app.services.memory_service import get_memory_manager
+from app.services.reasoning_integration import plan_pipeline_reasoning
 
 _logger = logging.getLogger(__name__)
 _pipeline = None
+
+
+def _stage_reasoning_node(domain_agent: str, stage: str, objective: str = ""):
+    def node(state: PolarisGraphState) -> PolarisGraphState:
+        memory = get_memory_manager()
+        payload = {
+            "action": "run",
+            "research_goal": state.get("research_goal") or memory.get_var("research_goal") or "",
+        }
+        if objective:
+            payload["objective"] = objective
+        try:
+            plan_pipeline_reasoning(
+                memory,
+                domain_agent,
+                stage,
+                payload=payload,
+                objective=objective,
+            )
+        except Exception as exc:
+            _logger.warning("Reasoning gate failed for %s: %s", stage, exc)
+        return {**state}
+
+    return node
 
 
 def _route_after_analysis(state: PolarisGraphState) -> str:
@@ -37,22 +62,51 @@ def build_pipeline(checkpointer: Optional[BaseCheckpointSaver] = None) -> Compil
 
     # Embed compiled sub-graphs as single nodes
     g.add_node("hypothesis", hypothesis_subgraph())
+    g.add_node("reason_experiment", _stage_reasoning_node("Experiment Agent", "experiment"))
     g.add_node("experiment", experiment_subgraph())
+    g.add_node(
+        "reason_curve_fitting",
+        _stage_reasoning_node(
+            "Curve Fitting Agent",
+            "curve_fitting",
+            "Calculate curve fits, preserve raw measurements, and export diagnostics.",
+        ),
+    )
     g.add_node("curve_fitting", curve_fitting_subgraph())
+    g.add_node(
+        "reason_ml_models",
+        _stage_reasoning_node(
+            "ML Models Agent",
+            "ml_models",
+            "Select and run predictive models while preserving validation and uncertainty constraints.",
+        ),
+    )
     g.add_node("ml_models", ml_models_node)
+    g.add_node(
+        "reason_analysis",
+        _stage_reasoning_node(
+            "Analysis Agent",
+            "analysis",
+            "Evaluate whether results support the hypothesis, separate observation from inference, and decide the next justified action.",
+        ),
+    )
     g.add_node("analysis", analysis_subgraph())
     g.add_node("fallback", fallback_node)
     g.add_node("watcher", watcher_node)
 
     g.set_entry_point("hypothesis")
-    g.add_edge("hypothesis", "experiment")
-    g.add_edge("experiment", "curve_fitting")
-    g.add_edge("curve_fitting", "ml_models")
-    g.add_edge("ml_models", "analysis")
+    g.add_edge("hypothesis", "reason_experiment")
+    g.add_edge("reason_experiment", "experiment")
+    g.add_edge("experiment", "reason_curve_fitting")
+    g.add_edge("reason_curve_fitting", "curve_fitting")
+    g.add_edge("curve_fitting", "reason_ml_models")
+    g.add_edge("reason_ml_models", "ml_models")
+    g.add_edge("ml_models", "reason_analysis")
+    g.add_edge("reason_analysis", "analysis")
     g.add_conditional_edges(
         "analysis",
         _route_after_analysis,
-        {"experiment": "experiment", END: END},
+        {"experiment": "reason_experiment", END: END},
     )
     g.add_edge("fallback", END)
     g.add_edge("watcher", END)

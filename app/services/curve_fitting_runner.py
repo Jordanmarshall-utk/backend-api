@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from app.services.composition_fallback import ensure_composition_csv
+from app.services.composition_fallback import composition_provenance, ensure_composition_csv
 from app.services.curve_fitting_exports import sync_ml_paths_from_curve_fitting
 from app.services.curve_fitting_service import serialize_curve_fitting_results
-from app.services.llm_runtime import require_api_key
 
 
 def run_curve_fitting_for_api(memory: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -28,25 +27,15 @@ def run_curve_fitting_for_api(memory: Any, payload: Dict[str, Any]) -> Dict[str,
     memory.set_var("curve_fitting_last_error", None)
 
     try:
-        require_api_key(memory)
-    except ValueError as exc:
-        memory.set_var("curve_fitting_last_error", str(exc))
-        return {
-            "ready": True,
-            "status": "error",
-            "message": str(exc),
-            "data_file": data_file,
-            "has_results": False,
-        }
-
-    try:
         from app.agents.curve_fitting_agent import CurveFittingAgent
 
         agent = CurveFittingAgent()
         agent.memory = memory
 
         comp_file = ensure_composition_csv(data_file, payload.get("composition_file"))
+        comp_provenance = composition_provenance(comp_file)
         memory.set_var("curve_fitting_last_composition_file", comp_file)
+        memory.set_var("curve_fitting_composition_provenance", comp_provenance)
 
         params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
 
@@ -65,6 +54,7 @@ def run_curve_fitting_for_api(memory: Any, payload: Dict[str, Any]) -> Dict[str,
             api_delay_seconds=float(
                 payload.get("api_delay_seconds") or params.get("api_delay_seconds") or 0.5
             ),
+            use_llm=bool(payload.get("use_llm") or params.get("use_llm") or False),
             auto_trigger=True,
         )
 
@@ -137,6 +127,7 @@ def run_curve_fitting_for_api(memory: Any, payload: Dict[str, Any]) -> Dict[str,
             "results": serialized,
             "data_file": data_file,
             "composition_file": comp_file,
+            "composition_provenance": comp_provenance,
         }
         if workflow_followup:
             response["workflow"] = workflow_followup

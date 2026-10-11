@@ -4,6 +4,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from app.core.deps import get_current_user
 from app.core.auth import AuthUser
@@ -232,7 +233,6 @@ def curve_fitting_plot(
         raise HTTPException(status_code=404, detail="Plot not found for this well/read")
     return FileResponse(
         path=str(plot_path),
-        media_type="image/png",
         filename=plot_path.name,
     )
 
@@ -274,7 +274,8 @@ async def run_curve_fitting(
     if composition_file and composition_file.filename:
         payload["composition_file_name"] = composition_file.filename
 
-    result = run_named_agent(
+    result = await run_in_threadpool(
+        run_named_agent,
         _AGENT_PATHS["curve-fitting"],
         experiment_id=experiment_id,
         payload=payload,
@@ -302,3 +303,13 @@ def run_analysis(
 ) -> AgentRunResponse:
     result = run_named_agent(_AGENT_PATHS["analysis"], experiment_id=body.experiment_id, payload=body.payload)
     return AgentRunResponse(**result)
+
+@router.get("/hypothesis/quality/latest")
+async def get_latest_hypothesis_quality_status(
+    current_user: Annotated[AuthUser, Depends(get_current_user)],
+):
+    """Return the latest read-only Hypothesis auditor/editor trace."""
+    from app.services.hypothesis_quality_control import get_latest_hypothesis_quality
+
+    memory = get_memory_manager()
+    return get_latest_hypothesis_quality(memory)

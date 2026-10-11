@@ -139,6 +139,8 @@ def _serialize_well_result(item: Dict[str, Any]) -> Dict[str, Any]:
         "read": read_str or None,
         "fit": _serialize_fit_result(item.get("fit_result")),
         "quality_assessment": quality,
+        "qa": to_jsonable(item.get("qa") or {}),
+        "analysis_mode": str(item.get("analysis_mode") or "unknown"),
         "plot_url": plot_url,
         "plot_path": str(plot_path) if plot_path else None,
     }
@@ -166,6 +168,12 @@ def serialize_curve_fitting_results(raw: Any) -> Optional[Dict[str, Any]]:
             "total_wells": int(total),
             "successful_fits": int(successful),
             "success_rate_pct": round(100.0 * int(successful) / max(int(total), 1), 1),
+            "review_required": int(
+                summary.get("review_required")
+                if summary.get("review_required") is not None
+                else sum(1 for w in wells if (w.get("qa") or {}).get("review_required"))
+            ),
+            "analysis_mode": summary.get("analysis_mode"),
             "wells_analyzed": to_jsonable(wells_analyzed) if wells_analyzed is not None else None,
         }
     else:
@@ -210,11 +218,13 @@ def get_curve_fitting_results(memory: Any) -> Dict[str, Any]:
     last_error = memory.get_var("curve_fitting_last_error")
     data_file = memory.get_var("curve_fitting_last_data_file")
     comp_file = memory.get_var("curve_fitting_last_composition_file")
+    comp_provenance = memory.get_var("curve_fitting_composition_provenance")
     return {
         "has_results": serialized is not None and bool(serialized.get("wells")),
         "last_error": str(last_error) if last_error else None,
         "data_file": data_file,
         "composition_file": comp_file,
+        "composition_provenance": to_jsonable(comp_provenance),
         "results": serialized,
     }
 

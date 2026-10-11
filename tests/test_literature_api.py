@@ -23,7 +23,7 @@ def svc():
             "paper_slug": "slug1",
             "title": "Test Paper",
             "doi": "10.1234/test",
-            "score": 5,
+            "score": 5.25,
             "summary_excerpt": "A summary excerpt.",
         }
     ]
@@ -73,6 +73,7 @@ def test_search_returns_hits(svc):
     hits = resp.json()
     assert isinstance(hits, list)
     assert hits[0]["paper_slug"] == "slug1"
+    assert hits[0]["score"] == 5.25
 
 
 def test_start_stage_validates_stage(svc):

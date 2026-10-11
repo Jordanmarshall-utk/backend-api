@@ -162,7 +162,6 @@ class ExperimentMemory:
             if not exp_comp:
                 continue
             
-            # Simple similarity check (can be enhanced)
             similarity = self._calculate_composition_similarity(composition, exp_comp)
             if similarity >= threshold:
                 similar.append({**exp, "similarity": similarity})

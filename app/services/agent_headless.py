@@ -79,7 +79,7 @@ def run_experiment_agent(memory: Any, payload: Dict[str, Any]) -> Dict[str, Any]
                 experimental_constraints=payload.get("experimental_constraints"),
                 manual_inputs=payload.get("manual_inputs"),
             )
-        return {"ready": True, **run_experiment_pipeline(memory)}
+        return {"ready": True, **run_experiment_pipeline(memory, payload)}
 
     session = get_experiment_session(memory)
     last_doc = memory.get_var("document_experiment") or memory.get_var("last_document")
@@ -132,6 +132,7 @@ def run_analysis_agent(memory: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
         "analysis_preview": (result.get("analysis_report") or "")[:1500],
         "analysis_report": result.get("analysis_report"),
         "parsed": result.get("parsed"),
+        "quality": result.get("quality"),
         "session": result.get("session"),
     }
 

@@ -53,13 +53,13 @@ script, allowing the report to verify that both runs used identical model code.
 Set paths:
 
 ```powershell
-$model = "E:\LiteratureAgentProject\models\pce_then_stability_same_approach.py"
-$compare = "E:\LiteratureAgentProject\scripts\compare_model_runs.py"
-$beforeCsv = "C:\Users\jorda\Downloads\Perovskite_database_content_all_data.csv"
-$afterCsv = "E:\LiteratureAgent\artifacts_literature_dataset_update\updated_perovskite_database_with_literature_agent.csv"
-$beforeOut = "E:\LiteratureAgent\artifacts_pce_then_stability_before_literature"
-$afterOut = "E:\LiteratureAgent\artifacts_pce_then_stability_after_literature"
-$comparisonOut = "E:\LiteratureAgent\artifacts_pce_stability_before_after_comparison"
+$model = "<repo_root>\models\pce_then_stability_same_approach.py"
+$compare = "<repo_root>\scripts\compare_model_runs.py"
+$beforeCsv = "<repo_root_or_data_dir>\Perovskite_database_content_all_data.csv"
+$afterCsv = "<repo_root>\artifacts\literature_dataset_update\updated_perovskite_database_with_literature_agent.csv"
+$beforeOut = "<repo_root>\artifacts\pce_then_stability_before_literature"
+$afterOut = "<repo_root>\artifacts\pce_then_stability_after_literature"
+$comparisonOut = "<repo_root>\artifacts\pce_stability_before_after_comparison"
 ```
 
 Run the original database:
@@ -118,8 +118,8 @@ To gather every plot from a model-result folder into one categorized gallery
 without moving the original files:
 
 ```powershell
-python "E:\LiteratureAgentProject\scripts\organize_model_plots.py" `
-  --run-dir "E:\LiteratureAgent\artifacts_pce_then_stability_after_literature"
+python "<repo_root>\scripts\organize_model_plots.py" `
+  --run-dir "<repo_root>\artifacts\pce_then_stability_after_literature"
 ```
 
 This creates:

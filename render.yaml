@@ -14,7 +14,11 @@ services:
       - key: CORS_ORIGINS
         value: http://localhost:3000,http://127.0.0.1:3000,http://localhost:8081,http://127.0.0.1:8081
       - key: AUTH_DISABLED
-        value: "true"
+        value: "false"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
       - key: LLM_PROVIDER
         sync: false
       - key: LLM_API_KEY

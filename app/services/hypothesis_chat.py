@@ -22,6 +22,10 @@ from app.services.hypothesis_perf import (
 )
 from app.services.document_export import export_agent_document
 from app.services.llm_runtime import require_api_key
+from app.services.reasoning_integration import (
+    plan_hypothesis_reasoning,
+    reasoning_context_for_synthesis,
+)
 from app.tools import socratic
 from app.tools.instruct import HYPOTHESIS_READINESS_CHECK
 from app.tools.mcp_orchestrator_bridge import sync_hypothesis_proposal
@@ -66,14 +70,96 @@ def _normalize_options(options: Any) -> List[str]:
     return options[:3]
 
 
-def _literature_handoff_bubble() -> Optional[Dict[str, str]]:
+def _resolve_choice(memory: Any, choice: str, stage: Optional[str] = None) -> str:
+    """Resolve a numeric choice or an exact displayed option without silent fallback."""
+    selected = str(choice or "").strip()
+    if selected in ("1", "2", "3"):
+        return selected
+
+    current_stage = stage or str(memory.get_var("stage") or "")
+    if current_stage == "refine":
+        options = (
+            memory.view_component("first_thought_1"),
+            memory.view_component("second_thought_1"),
+            memory.view_component("third_thought_1"),
+        )
+    elif current_stage == "hypothesis":
+        options = _next_step_options(memory)
+    else:
+        raise ValueError(f"Cannot choose option in stage '{current_stage}'.")
+
+    exact_matches = [
+        str(index)
+        for index, option in enumerate(options, 1)
+        if option is not None and str(option).strip() == selected
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    raise ValueError("Choice must be 1, 2, 3, or exactly match one displayed option.")
+
+
+def _available_packet_reference_note(handoff: Dict[str, Any]) -> str:
+    claim_ids = [str(item) for item in handoff.get("claim_ids") or [] if str(item).strip()]
+    source_ids = [str(item) for item in handoff.get("source_ids") or [] if str(item).strip()]
+    if not claim_ids and not source_ids:
+        return " No packet source identifier was detected in the generated response."
+    parts: List[str] = []
+    if claim_ids:
+        parts.append("claims " + ", ".join(f"[{item}]" for item in claim_ids[:8]))
+    if source_ids:
+        parts.append("sources " + ", ".join(f"`{item}`" for item in source_ids[:5]))
+    return (
+        " The generated options did not cite a packet source and therefore remain unsupported. "
+        "Available packet references for manual review (not candidate-specific validation): "
+        + "; ".join(parts)
+        + "."
+    )
+
+
+def _literature_handoff_bubble(
+    memory: Any = None,
+    selected_scope: str = "",
+) -> Optional[Dict[str, str]]:
     handoff = socratic.get_last_literature_handoff()
     if not handoff:
         return None
+    if selected_scope:
+        handoff["selected_scope"] = str(selected_scope)
+        socratic.set_last_literature_handoff(handoff)
+    if memory is not None:
+        memory.set_var("last_literature_handoff", handoff)
+    handoff_status = str(handoff.get("status") or "")
     retrieval = handoff.get("background_retrieval_job")
     grounding_status = str(handoff.get("grounding_status") or "")
+    retrieval_query = str(handoff.get("retrieval_query") or handoff.get("query") or "").strip()
+    scope_note = (
+        "\n\n**Evidence scope:** " + retrieval_query[:320]
+        if retrieval_query else ""
+    )
+    if handoff_status == "deferred_until_branch_selection":
+        return {
+            "role": "assistant",
+            "title": "LiteratureAgent evidence status",
+            "content": (
+                "Literature retrieval has not run for these thoughts yet. Treat every "
+                "option as an unverified proposal until a branch-specific evidence "
+                "packet is retrieved."
+            ),
+        }
     if grounding_status == "unavailable_after_retries":
         attempts = int(handoff.get("retrieval_attempt_count") or 0)
+        background_count = int(handoff.get("background_claim_count") or 0)
+        background_sources = list(handoff.get("source_ids") or [])
+        background_note = ""
+        if background_count:
+            background_note = (
+                f" LiteratureAgent retained {background_count} related background claim(s); these can motivate "
+                "the question but do not directly validate the selected proposal."
+            )
+            if background_sources:
+                background_note += " Background source(s): " + ", ".join(
+                    f"`{item}`" for item in background_sources[:5]
+                ) + "."
         return {
             "role": "assistant",
             "title": "LiteratureAgent grounding unavailable",
@@ -81,6 +167,8 @@ def _literature_handoff_bubble() -> Optional[Dict[str, str]]:
                 f"LiteratureAgent completed {attempts} targeted retrieval attempt(s), but no strongly relevant "
                 "evidence packet was found. The exploration options were still generated using the original "
                 "Hypothesis Agent workflow. Treat them as unverified proposals, not literature-supported claims."
+                + background_note
+                + scope_note
             ),
         }
     if grounding_status == "partially_grounded":
@@ -96,8 +184,9 @@ def _literature_handoff_bubble() -> Optional[Dict[str, str]]:
                     + ", ".join(f"`{item}`" for item in used_sources)
                     + "."
                     if used_sources else
-                    "\n\nNo packet source identifier was detected in the generated response."
+                    "\n\n" + _available_packet_reference_note(handoff).lstrip()
                 )
+                + scope_note
             ),
         }
     if isinstance(retrieval, dict) and retrieval.get("job_id"):
@@ -107,7 +196,7 @@ def _literature_handoff_bubble() -> Optional[Dict[str, str]]:
             usage_note = (
                 "\n\n**Evidence used:** " + ", ".join(f"`{item}`" for item in used_sources)
                 if used_sources else
-                "\n\nThe packet was available, but no source identifier was detected in the generated response."
+                "\n\n" + _available_packet_reference_note(handoff).lstrip()
             )
             content = (
                 "The original local packet did not contain enough direct support. The Hypothesis Agent "
@@ -116,6 +205,7 @@ def _literature_handoff_bubble() -> Optional[Dict[str, str]]:
                 f"**Job:** `{retrieval['job_id']}`  \n"
                 "**Status:** `completed`"
                 + usage_note
+                + scope_note
             )
         else:
             content = (
@@ -123,6 +213,7 @@ def _literature_handoff_bubble() -> Optional[Dict[str, str]]:
                 "generating exploration options.\n\n"
                 f"**Job:** `{retrieval['job_id']}`  \n"
                 f"**Status:** `{status}`"
+                + scope_note
             )
         return {"role": "assistant", "title": "LiteratureAgent handoff", "content": content}
     strong_count = int(handoff.get("strong_evidence_count") or 0)
@@ -136,8 +227,9 @@ def _literature_handoff_bubble() -> Optional[Dict[str, str]]:
                 + (
                     "Evidence cited in the response: " + ", ".join(f"`{item}`" for item in used_sources) + "."
                     if used_sources else
-                    "No source identifier was detected in the generated response."
+                    _available_packet_reference_note(handoff).lstrip()
                 )
+                + scope_note
             ),
         }
     if handoff.get("background_retrieval_error") or handoff.get("error"):
@@ -146,7 +238,15 @@ def _literature_handoff_bubble() -> Optional[Dict[str, str]]:
             "title": "LiteratureAgent handoff",
             "content": "Direct local evidence was insufficient, but the targeted literature search could not be started. Check the Literature Agent page for details.",
         }
-    return None
+    return {
+        "role": "assistant",
+        "title": "LiteratureAgent evidence status",
+        "content": (
+            "No directly supporting literature was identified for the current evidence scope. "
+            "Treat the generated thoughts as exploratory proposals rather than literature-supported claims."
+            + scope_note
+        ),
+    }
 
 
 def _insert_handoff_bubble(bubbles: List[Dict[str, str]], bubble: Optional[Dict[str, str]]) -> None:
@@ -172,9 +272,15 @@ def submit_question(memory: Any, question: str, reasoning_policy: str = "auto") 
         raise ValueError("Question is required.")
 
     policy = reasoning_policy or "auto"
-    memory.set_var("reasoning_policy", policy)
+    decision = plan_hypothesis_reasoning(
+        memory,
+        q,
+        "hypothesis_generation",
+        requested_policy=policy,
+    )
+    policy = decision.effective_policy
 
-    clarified = socratic.clarify_question(q)
+    clarified = socratic.clarify_question(q, reasoning_policy=policy)
     if not clarified or not str(clarified).strip():
         raise ValueError("Could not generate clarified question. Check your API key in Settings.")
 
@@ -195,7 +301,9 @@ def submit_question(memory: Any, question: str, reasoning_policy: str = "auto") 
         soc_pass = socratic.socratic_pass(clarified, reasoning_policy=policy)
         if not soc_pass or not str(soc_pass).strip():
             raise ValueError("Could not generate socratic questions.")
-        soc_answers = socratic.socratic_answer_questions(clarified, soc_pass)
+        soc_answers = socratic.socratic_answer_questions(
+            clarified, soc_pass, reasoning_policy=policy
+        )
         thoughts = socratic.tot_generation(soc_pass, clarified, soc_answers, reasoning_policy=policy)
 
     if not soc_pass or not str(soc_pass).strip():
@@ -220,7 +328,7 @@ def submit_question(memory: Any, question: str, reasoning_policy: str = "auto") 
     memory.set_var("stage", "refine")
     _bump_usage(memory)
 
-    handoff_bubble = _literature_handoff_bubble()
+    handoff_bubble = _literature_handoff_bubble(memory)
     if handoff_bubble:
         memory.insert_interaction(
             "assistant", handoff_bubble["content"], "literature_agent_handoff", "hypothesis"
@@ -232,6 +340,7 @@ def submit_question(memory: Any, question: str, reasoning_policy: str = "auto") 
         "messages": bubbles,
         "assistant_message": join_bubbles_for_legacy(bubbles),
         "options": thoughts[:3],
+        "reasoning_plan": decision.plan.model_dump(mode="json"),
     }
 
 
@@ -284,7 +393,7 @@ def _choose_refine_option(memory: Any, choice: str) -> Dict[str, Any]:
         else "How can we continue exploring this hypothesis?"
     )
     bubbles = build_choose_bubbles(str(picked), soc_q_display, options[:3])
-    handoff_bubble = _literature_handoff_bubble()
+    handoff_bubble = _literature_handoff_bubble(memory, str(picked))
     _insert_handoff_bubble(bubbles, handoff_bubble)
     if handoff_bubble:
         memory.insert_interaction(
@@ -370,7 +479,7 @@ def _choose_hypothesis_next_step(memory: Any, choice: str) -> Dict[str, Any]:
     memory.set_var("stage", "hypothesis")
 
     bubbles = build_continue_bubbles(str(picked), new_opts[:3])
-    handoff_bubble = _literature_handoff_bubble()
+    handoff_bubble = _literature_handoff_bubble(memory, str(picked))
     _insert_handoff_bubble(bubbles, handoff_bubble)
     if handoff_bubble:
         memory.insert_interaction(
@@ -386,10 +495,8 @@ def _choose_hypothesis_next_step(memory: Any, choice: str) -> Dict[str, Any]:
 
 def choose_option(memory: Any, choice: str) -> Dict[str, Any]:
     _ensure_api_key(memory)
-    if choice not in ("1", "2", "3"):
-        raise ValueError("Choice must be 1, 2, or 3.")
-
     stage = memory.get_var("stage")
+    choice = _resolve_choice(memory, choice, str(stage or ""))
     if stage == "refine":
         return _choose_refine_option(memory, choice)
     if stage == "hypothesis":
@@ -418,6 +525,9 @@ def _hypothesis_document_fields(memory: Any, hypothesis: str, analysis_rubric: O
 def generate_hypothesis(memory: Any) -> Dict[str, Any]:
     _ensure_api_key(memory)
     agent = _agent(memory)
+    persisted_handoff = memory.get_var("last_literature_handoff")
+    if isinstance(persisted_handoff, dict):
+        socratic.set_last_literature_handoff(persisted_handoff)
     opt1, opt2, opt3 = _next_step_options(memory)
 
     reasoning_policy = str(memory.get_var("reasoning_policy") or "auto")
@@ -452,10 +562,34 @@ def generate_hypothesis(memory: Any) -> Dict[str, Any]:
             "Insufficient context to generate hypothesis. Complete at least one exploration step first."
         )
 
+    selected_packet_context = ""
+    if isinstance(persisted_handoff, dict):
+        selected_packet_context = str(
+            persisted_handoff.get("formatted_context") or ""
+        ).strip()
+
     context = trim_context(_full_context(agent))
-    hypothesis = socratic.hypothesis_synthesis(soc_q, selected, prev1, prev2, context, reasoning_policy=reasoning_policy)
+    council_context = reasoning_context_for_synthesis(memory)
+    if council_context:
+        context = trim_context(f"{context}\n\n{council_context}")
+    hypothesis = socratic.hypothesis_synthesis(
+        soc_q,
+        selected,
+        prev1,
+        prev2,
+        context,
+        reasoning_policy=reasoning_policy,
+        literature_context_override=selected_packet_context or None,
+    )
     if hypothesis is None or not str(hypothesis).strip():
         raise ValueError("Error generating hypothesis. Check your API key in Settings.")
+    synthesis_handoff = socratic.get_last_literature_handoff()
+    if isinstance(synthesis_handoff, dict):
+        synthesis_handoff["used_for_hypothesis_synthesis"] = True
+        memory.set_var("last_literature_handoff", synthesis_handoff)
+        selected_packet_context = str(
+            synthesis_handoff.get("formatted_context") or selected_packet_context
+        ).strip()
 
     reasoning_meta: Optional[Dict] = None
     try:
@@ -472,13 +606,18 @@ def generate_hypothesis(memory: Any) -> Dict[str, Any]:
 
     analysis_rubric: Optional[str] = None
     if not skip_analysis_on_generate():
+        persisted_synthesis_handoff = memory.get_var("last_literature_handoff")
+        if isinstance(persisted_synthesis_handoff, dict):
+            socratic.set_last_literature_handoff(persisted_synthesis_handoff)
         socratic_question_for_analysis = (
             memory.view_component("retry_thinking_question")
             or memory.view_component("socratic_pass")
             or soc_q
         )
         analysis_rubric = socratic.local_hypothesis_analysis_fallback(
-            hypothesis, socratic_question_for_analysis
+            hypothesis,
+            socratic_question_for_analysis,
+            literature_context_override=selected_packet_context or None,
         )
 
     memory.insert_interaction("assistant", hypothesis, "hypothesis", "hypothesis")
@@ -498,13 +637,14 @@ def generate_hypothesis(memory: Any) -> Dict[str, Any]:
         str(hypothesis),
         str(analysis_rubric) if analysis_rubric else None,
     )
-    handoff_bubble = _literature_handoff_bubble()
+    handoff_bubble = _literature_handoff_bubble(memory)
     _insert_handoff_bubble(bubbles, handoff_bubble)
     return {
         "stage": "analysis",
         "messages": bubbles,
         "assistant_message": join_bubbles_for_legacy(bubbles),
         "options": [],
+        "reasoning_plan": memory.get_var("last_reasoning_plan"),
         **({"reasoning_metadata": reasoning_meta} if reasoning_meta else {}),
         **_hypothesis_document_fields(memory, str(hypothesis), analysis_rubric),
     }
@@ -515,6 +655,15 @@ def reset_session(memory: Any) -> Dict[str, Any]:
     memory.set_var("hypothesis_round_count", 0)
     memory.set_var("stop_hypothesis", False)
     memory.set_var("hypothesis_ready", False)
+    memory.set_var("last_hypothesis", None)
+    memory.set_var("last_reasoning_plan", None)
+    memory.set_var("reasoning_policy", "auto")
+    memory.set_var("reasoning_assumptions", [])
+    memory.set_var("reasoning_contradictions", [])
+    memory.set_var("interactions", [])
+    memory.set_var("current_prompt_session_id", None)
+    memory.set_var("last_literature_handoff", None)
+    socratic.set_last_literature_handoff(None)
     return {"stage": "initial", "messages": [], "assistant_message": "", "options": []}
 
 
@@ -539,3 +688,11 @@ def handle_chat(
     if action == "generate_hypothesis":
         return generate_hypothesis(memory)
     raise ValueError(f"Unknown action: {action}")
+
+
+from app.services.hypothesis_branch_grounding import (
+    install_unicode_choice_resolution as _install_unicode_choice_resolution,
+)
+
+_install_unicode_choice_resolution(globals())
+del _install_unicode_choice_resolution

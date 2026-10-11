@@ -2,23 +2,21 @@
 
 Patched controller script:
 
-`E:\LiteratureAgentProject\literature_agent_full_end_to_end_v21_3_english_sanitizer.py`
+`<repo_root>\literature_agent_full_end_to_end_v21_3_english_sanitizer.py`
 
-The active copy in Downloads was also patched:
+If you have a local copy elsewhere, use that path in the `$script` variable below.
 
-`C:\Users\jorda\Downloads\literature_agent_full_end_to_end_v21_3_english_sanitizer.py`
-
-Set common paths:
+Set common paths (edit these to match your workstation):
 
 ```powershell
-$script = "E:\LiteratureAgentProject\literature_agent_full_end_to_end_v21_3_english_sanitizer.py"
-$base = "C:\Users\jorda\Downloads\Perovskite_database_content_all_data.csv"
-$ontology = "E:\LiteratureAgentProject\config\perovskite_ontology_library_v19.json"
-$work = "E:\LiteratureAgent\lit_outputs"
-$integration = "E:\LiteratureAgent\artifacts_literature_dataset_update"
-$modelScript = "E:\LiteratureAgentProject\models\pce_then_stability_same_approach.py"
-$modelOut = "E:\LiteratureAgent\artifacts_pce_then_stability_lit_updated"
-$knowledgeGraphOut = "E:\LiteratureAgent\artifacts_literature_knowledge_graph"
+$script = "$PWD\literature_agent_full_end_to_end_v21_3_english_sanitizer.py"
+$base = "$PWD\..\..\data\Perovskite_database_content_all_data.csv"
+$ontology = "$PWD\..\..\config\perovskite_ontology_library_v19.json"
+$work = "$PWD\..\..\lit_outputs"
+$integration = "$PWD\..\..\artifacts\literature_dataset_update"
+$modelScript = "$PWD\..\..\models\pce_then_stability_same_approach.py"
+$modelOut = "$PWD\..\..\artifacts\pce_then_stability_lit_updated"
+$knowledgeGraphOut = "$PWD\..\..\artifacts\literature_knowledge_graph"
 ```
 
 Build or refresh the evidence-grounded claim-centered scientific knowledge

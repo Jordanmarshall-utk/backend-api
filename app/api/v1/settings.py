@@ -15,6 +15,7 @@ _SETTINGS_KEYS = {
     "llm_model": "llm_model",
     "qwen_base_url": "qwen_base_url",
     "routing_mode": "routing_mode",
+    "reasoning_mode": "reasoning_mode",
     "max_hypothesis_rounds": "max_hypothesis_rounds",
     "watcher_directory": "watcher_directory",
     "watcher_results_dir": "watcher_results_dir",
@@ -30,6 +31,7 @@ def _read_settings(memory) -> AppSettingsResponse:
         llm_model=memory.get_var("llm_model"),
         qwen_base_url=memory.get_var("qwen_base_url"),
         routing_mode=memory.get_var("routing_mode"),
+        reasoning_mode=memory.get_var("reasoning_mode", "Shadow"),
         max_hypothesis_rounds=memory.get_var("max_hypothesis_rounds"),
         watcher_directory=memory.get_var("watcher_directory"),
         watcher_results_dir=memory.get_var("watcher_results_dir"),
@@ -37,6 +39,7 @@ def _read_settings(memory) -> AppSettingsResponse:
         experimental_mode=memory.get_var("experimental_mode"),
         jupyter_config=get_jupyter_config(memory),
         api_key_configured=bool(api_key),
+        last_reasoning_plan=memory.get_var("last_reasoning_plan"),
     )
 
 
