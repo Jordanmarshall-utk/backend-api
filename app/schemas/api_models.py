@@ -214,3 +214,21 @@ class HistoryEntry(BaseModel):
 
 class HistoryListResponse(BaseModel):
     items: List[HistoryEntry]
+
+
+class FeedbackAppContext(BaseModel):
+    version: Optional[str] = None
+    platform: Optional[str] = None
+    is_desktop: bool = False
+    url: Optional[str] = None
+
+
+class FeedbackRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=5000)
+    category: Literal["bug", "feature", "other"] = "bug"
+    app_context: Optional[FeedbackAppContext] = None
+    console_errors: List[str] = Field(default_factory=list, max_length=20)
+
+
+class FeedbackResponse(BaseModel):
+    status: Literal["sent"] = "sent"

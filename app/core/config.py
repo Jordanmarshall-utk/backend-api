@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     mcp_allowed_hosts: str = ""
     mcp_allowed_origins: str = ""
 
+    smtp_host: str = "smtp.mail.me.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    feedback_to_email: str = ""
+
     @field_validator("debug", mode="before")
     @classmethod
     def _coerce_debug(cls, value):

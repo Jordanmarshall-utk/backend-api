@@ -25,6 +25,7 @@ dependencies = [
   "openpyxl",
   "matplotlib",
   "scipy",
+  "pyyaml>=6.0",
   "lmfit",
   "google-generativeai",
   "openai>=1.0.0",
