@@ -1,4 +1,5 @@
 {
+  "domain_profile": "halide_pv",
   "controller": "../literature_agent/controller/literature_agent_full_end_to_end_v21_3_english_sanitizer.py",
   "base_csv": "../data/Perovskite_database_content_all_data.csv",
   "ontology_path": "../literature_agent/config/perovskite_ontology_library_v19.json",

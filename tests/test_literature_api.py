@@ -17,7 +17,14 @@ def _mock_user():
 @pytest.fixture
 def svc():
     m = MagicMock()
-    m.health.return_value = {"ok": True, "active_jobs": [], "path_checks": {}}
+    m.config.domain_profile = "halide_pv"
+    m.health.return_value = {
+        "ok": True,
+        "domain_profile": "halide_pv",
+        "domain_profiles": ["general_science", "halide_pv", "oxide_perovskite"],
+        "active_jobs": [],
+        "path_checks": {},
+    }
     m.search.return_value = [
         {
             "paper_slug": "slug1",
@@ -55,6 +62,8 @@ def test_health_ok(svc):
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True
+    assert data["domain_profile"] == "halide_pv"
+    assert "general_science" in data["domain_profiles"]
     assert "active_jobs" in data
 
 
@@ -108,6 +117,85 @@ def test_start_stage_valid(svc):
         )
     assert resp.status_code == 200
     assert resp.json()["job_id"] == "job_new"
+    assert resp.json()["domain_profile"] == "halide_pv"
+    request = svc.start_stage.call_args.kwargs["request"]
+    assert request["domain_profile"] == "halide_pv"
+    assert request["extraction_profile"] == "pce_stability_modeling"
+    assert request["family_gating"] == "strict"
+
+
+def test_start_stage_non_halide_uses_general_profile_and_non_pv_gating(svc):
+    import app.api.v1.literature as lit_module
+    import app.core.deps as deps_module
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[deps_module.get_current_user] = _mock_user
+
+    with patch.object(lit_module, "get_service", return_value=svc):
+        client = TestClient(app)
+        resp = client.post(
+            "/literature/start_stage",
+            json={
+                "stage": "extract_batch",
+                "domain_profile": "oxide_perovskite",
+                "search_query": "oxygen vacancy conductivity",
+                "max_papers": 25,
+                "family_gating": "strict",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["domain_profile"] == "oxide_perovskite"
+    request = svc.start_stage.call_args.kwargs["request"]
+    assert request["domain_profile"] == "oxide_perovskite"
+    assert request["extraction_profile"] == "general_literature"
+    assert request["family_gating"] == "off"
+
+
+def test_start_stage_rejects_unknown_domain_profile(svc):
+    import app.api.v1.literature as lit_module
+    import app.core.deps as deps_module
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[deps_module.get_current_user] = _mock_user
+
+    with patch.object(lit_module, "get_service", return_value=svc):
+        client = TestClient(app)
+        resp = client.post(
+            "/literature/start_stage",
+            json={"stage": "extract_batch", "domain_profile": "unknown"},
+        )
+
+    assert resp.status_code == 400
+    assert "domain_profile" in resp.json()["detail"]
+    svc.start_stage.assert_not_called()
+
+
+def test_start_stage_maps_domain_safety_error_to_bad_request(svc):
+    import app.api.v1.literature as lit_module
+    import app.core.deps as deps_module
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[deps_module.get_current_user] = _mock_user
+    svc.start_stage.side_effect = ValueError(
+        "integrate_and_model is only available for domain_profile=halide_pv"
+    )
+
+    with patch.object(lit_module, "get_service", return_value=svc):
+        client = TestClient(app)
+        resp = client.post(
+            "/literature/start_stage",
+            json={
+                "stage": "integrate_and_model",
+                "domain_profile": "general_science",
+            },
+        )
+
+    assert resp.status_code == 400
+    assert "halide_pv" in resp.json()["detail"]
 
 
 def test_delete_job_cancels(svc):

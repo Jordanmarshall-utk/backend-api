@@ -30,6 +30,10 @@ except ImportError:
 
 STAGES = {"extract_batch", "vision_pass", "sanitize_summaries", "integrate_and_model", "knowledge_graph", "evidence_packet"}
 EXTRACTION_PROFILES = {"none", "hypothesis_support", "general_literature", "pce_stability_modeling"}
+DOMAIN_PROFILES = {"general_science", "oxide_perovskite", "halide_pv"}
+HALIDE_PV_DOMAIN_PROFILE = "halide_pv"
+PCE_EXTRACTION_PROFILE = "pce_stability_modeling"
+NON_PV_FAMILY_GATING = "off"
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 _STACK_ROOT = _BACKEND_ROOT.parent
@@ -63,6 +67,17 @@ QUERY_GENERIC_MATCHES = {
 }
 
 
+def normalize_domain_profile(value: Any) -> str:
+    """Return a supported LiteratureAgent domain-profile identifier."""
+    profile = str(value or "").strip()
+    if profile not in DOMAIN_PROFILES:
+        raise ValueError(
+            f"Unsupported domain_profile: {profile or '[empty]'}. "
+            f"Expected one of: {sorted(DOMAIN_PROFILES)}"
+        )
+    return profile
+
+
 @dataclass
 class LiteratureAgentConfig:
     controller: str = str(_LITERATURE_ROOT / "controller" / "literature_agent_full_end_to_end_v21_3_english_sanitizer.py")
@@ -78,6 +93,10 @@ class LiteratureAgentConfig:
     llm_api_url: str = "http://localhost:11434/v1/chat/completions"
     llm_model: str = "qwen2.5:7b"
     vision_model: str = "qwen2.5vl:7b-q4_K_M"
+    domain_profile: str = HALIDE_PV_DOMAIN_PROFILE
+
+    def __post_init__(self) -> None:
+        self.domain_profile = normalize_domain_profile(self.domain_profile)
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "LiteratureAgentConfig":
@@ -100,6 +119,7 @@ class LiteratureAgentConfig:
                 if value and not Path(str(value)).expanduser().is_absolute():
                     payload[field_name] = str((config_path.parent / str(value)).resolve())
         env_map = {
+            "domain_profile": "LITERATURE_AGENT_DOMAIN_PROFILE",
             "controller": "LITERATURE_AGENT_CONTROLLER",
             "base_csv": "LITERATURE_AGENT_BASE_CSV",
             "ontology_path": "LITERATURE_AGENT_ONTOLOGY",
@@ -150,6 +170,8 @@ class LiteratureAgentService:
         return {
             "ok": checks["controller"] and checks["work_dir"],
             "service": "LiteratureAgent",
+            "domain_profile": self.config.domain_profile,
+            "domain_profiles": sorted(DOMAIN_PROFILES),
             "stages": sorted(STAGES),
             "extraction_profiles": sorted(EXTRACTION_PROFILES),
             "paths": paths,
@@ -161,10 +183,26 @@ class LiteratureAgentService:
         if stage not in STAGES:
             raise ValueError(f"Unsupported stage: {stage}")
         request = request or {}
+        domain_profile = normalize_domain_profile(
+            request.get("domain_profile") or self.config.domain_profile
+        )
+        extraction_profile = str(request.get("extraction_profile", "none") or "none")
+        if extraction_profile not in EXTRACTION_PROFILES:
+            raise ValueError(f"Unsupported extraction_profile: {extraction_profile}")
+        if domain_profile != HALIDE_PV_DOMAIN_PROFILE:
+            if extraction_profile == PCE_EXTRACTION_PROFILE:
+                raise ValueError(
+                    "pce_stability_modeling is only available for domain_profile=halide_pv"
+                )
+            if stage == "integrate_and_model":
+                raise ValueError(
+                    "integrate_and_model is only available for domain_profile=halide_pv"
+                )
         command = [
             self.config.python_executable,
             self.config.controller,
             "--pipeline_stage", stage,
+            "--domain_profile", domain_profile,
             "--base_csv", self.config.base_csv,
             "--ontology_path", self.config.ontology_path,
             "--work_dir", self.config.work_dir,
@@ -176,17 +214,19 @@ class LiteratureAgentService:
             "--vision_model", self.config.vision_model,
             "--allow_embedded_reset", "0",
         ]
-        profile = str(request.get("extraction_profile", "none") or "none")
-        if profile not in EXTRACTION_PROFILES:
-            raise ValueError(f"Unsupported extraction_profile: {profile}")
-        if profile != "none":
-            command += ["--extraction_profile", profile]
+        if extraction_profile != "none":
+            command += ["--extraction_profile", extraction_profile]
         if stage == "extract_batch":
+            family_gating = (
+                str(request.get("family_gating") or "strict")
+                if domain_profile == HALIDE_PV_DOMAIN_PROFILE
+                else NON_PV_FAMILY_GATING
+            )
             command += [
                 "--run_mode", str(request.get("run_mode", "expand")),
                 "--max_papers", str(int(request.get("max_papers", 100))),
                 "--full_literature_run",
-                "--family_gating", str(request.get("family_gating", "strict")),
+                "--family_gating", family_gating,
                 "--inline_vision", "0",
                 "--vision_enable", "0",
                 "--llm_cache_enable", "1",

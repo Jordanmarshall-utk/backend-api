@@ -9,7 +9,15 @@ from pydantic import BaseModel
 
 from app.core.auth import AuthUser
 from app.core.deps import get_current_user
-from app.tools.literature_agent_service import LiteratureAgentConfig, LiteratureAgentService
+from app.tools.literature_agent_service import (
+    DOMAIN_PROFILES,
+    EXTRACTION_PROFILES,
+    HALIDE_PV_DOMAIN_PROFILE,
+    NON_PV_FAMILY_GATING,
+    PCE_EXTRACTION_PROFILE,
+    LiteratureAgentConfig,
+    LiteratureAgentService,
+)
 
 router = APIRouter()
 
@@ -21,7 +29,8 @@ def _validate_job_id(job_id: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid job_id format")
 
 VALID_STAGES = {"extract_batch", "vision_pass", "sanitize_summaries", "integrate_and_model", "knowledge_graph", "evidence_packet"}
-VALID_EXTRACTION_PROFILES = {"none", "hypothesis_support", "general_literature", "pce_stability_modeling"}
+VALID_EXTRACTION_PROFILES = EXTRACTION_PROFILES
+VALID_DOMAIN_PROFILES = DOMAIN_PROFILES
 
 
 def get_service() -> LiteratureAgentService:
@@ -59,8 +68,9 @@ class StartStageRequest(BaseModel):
     stage: str
     search_query: str = "perovskite solar cell stability T80 retention"
     max_papers: int = 100
-    extraction_profile: str = "pce_stability_modeling"
-    family_gating: str = "strict"
+    extraction_profile: str | None = None
+    family_gating: str | None = None
+    domain_profile: str | None = None
 
 
 class EvidencePacketRequest(BaseModel):
@@ -80,11 +90,19 @@ def get_literature_health(
         health = svc.health()
         return {
             "ok": health.get("ok", False),
+            "domain_profile": health.get("domain_profile"),
+            "domain_profiles": health.get("domain_profiles", sorted(VALID_DOMAIN_PROFILES)),
             "active_jobs": health.get("active_jobs", []),
             "path_checks": health.get("path_checks", {}),
         }
     except Exception:
-        return {"ok": False, "active_jobs": [], "path_checks": {}}
+        return {
+            "ok": False,
+            "domain_profile": None,
+            "domain_profiles": sorted(VALID_DOMAIN_PROFILES),
+            "active_jobs": [],
+            "path_checks": {},
+        }
 
 
 @router.post("/literature/search", response_model=list[PaperHit])
@@ -157,23 +175,47 @@ def start_literature_stage(
             status_code=400,
             detail=f"Invalid stage '{body.stage}'. Must be one of: {sorted(VALID_STAGES)}",
         )
-    if body.extraction_profile not in VALID_EXTRACTION_PROFILES:
+    if body.domain_profile is not None and body.domain_profile not in VALID_DOMAIN_PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid domain_profile '{body.domain_profile}'. Must be one of: {sorted(VALID_DOMAIN_PROFILES)}",
+        )
+    if body.extraction_profile is not None and body.extraction_profile not in VALID_EXTRACTION_PROFILES:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid extraction_profile '{body.extraction_profile}'. Must be one of: {sorted(VALID_EXTRACTION_PROFILES)}",
         )
     svc = get_service()
-    job = svc.start_stage(
-        body.stage,
-        request={
-            "search_query": body.search_query,
-            "max_papers": body.max_papers,
-            "extraction_profile": body.extraction_profile,
-            "family_gating": body.family_gating,
-            "disable_google_drive": True,
-        },
+    domain_profile = body.domain_profile or svc.config.domain_profile
+    extraction_profile = body.extraction_profile or (
+        PCE_EXTRACTION_PROFILE
+        if domain_profile == HALIDE_PV_DOMAIN_PROFILE
+        else "general_literature"
     )
-    return {"job_id": job["job_id"], "status": job["status"]}
+    family_gating = (
+        body.family_gating or "strict"
+        if domain_profile == HALIDE_PV_DOMAIN_PROFILE
+        else NON_PV_FAMILY_GATING
+    )
+    try:
+        job = svc.start_stage(
+            body.stage,
+            request={
+                "search_query": body.search_query,
+                "max_papers": body.max_papers,
+                "extraction_profile": extraction_profile,
+                "family_gating": family_gating,
+                "domain_profile": domain_profile,
+                "disable_google_drive": True,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "domain_profile": domain_profile,
+    }
 
 
 @router.delete("/literature/jobs/{job_id}")

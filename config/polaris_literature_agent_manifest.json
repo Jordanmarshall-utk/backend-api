@@ -2,6 +2,12 @@
   "agent_id": "literature_agent",
   "display_name": "LiteratureAgent",
   "domain": "halide_perovskite_literature",
+  "default_domain_profile": "halide_pv",
+  "supported_domain_profiles": [
+    "general_science",
+    "oxide_perovskite",
+    "halide_pv"
+  ],
   "version": "v21.4-polaris-live-adapter",
   "execution": {
     "mode": "durable_subprocess_jobs",
@@ -39,6 +45,8 @@
     "inline_vision": false,
     "embedded_reset": false,
     "search_expansion_uses_google_drive": false,
-    "strict_family_gating": true
+    "strict_family_gating": true,
+    "non_halide_family_gating": "off",
+    "pce_integration_domain": "halide_pv"
   }
 }

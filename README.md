@@ -15,6 +15,11 @@ uvicorn app.main:app --reload --port 8080
 
 Health: `GET http://localhost:8080/api/v1/health`
 
+LiteratureAgent supports configurable scientific domains while retaining
+`halide_pv` as the default. See
+**[docs/LITERATURE_AGENT_DOMAINS.md](./docs/LITERATURE_AGENT_DOMAINS.md)** for
+configuration, API examples, and the PCE-model safety boundary.
+
 ### Deploy to Railway (production API)
 
 See **[docs/DEPLOY-RAILWAY.md](./docs/DEPLOY-RAILWAY.md)** for volume setup, env vars, and pointing Vercel `NEXT_PUBLIC_API_URL` at your Railway domain.
