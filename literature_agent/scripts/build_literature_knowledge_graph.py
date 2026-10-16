@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an evidence-grounded perovskite literature property graph."""
+"""Build an evidence-grounded scientific literature property graph."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -19,6 +20,16 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pandas as pd
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from literature_agent.reasoning.scientific_reasoning_policy_layer import POLICIES as REASONING_POLICIES
+except Exception:
+    REASONING_POLICIES = {}
 
 
 MISSING = {"", "nan", "none", "null", "unknown", "not reported", "n/a", "na", "-", "--"}
@@ -76,13 +87,36 @@ CHARACTERIZATION_HINTS = {
     "device_schematic": "device schematic",
 }
 
+# Only these legacy ontology roots use the historical
+# ``canonical_name: [aliases...]`` representation. Other bare lists in domain
+# packs are category vocabularies, not synonym sets, and must not be collapsed
+# to their parent key (for example, every characterization term must not become
+# the single concept ``characterization``).
+LEGACY_CANONICAL_ONTOLOGY_ROOTS = {
+    "a_site_cations",
+    "b_site_cations",
+    "x_site_anions",
+    "additives_passivators",
+    "solvents",
+}
+ONTOLOGY_NON_TERM_ROOTS = {
+    "device_layers",
+    "family_gate_terms",
+    "family_ontology_map",
+    "figure_task_ontology",
+    "structured_output",
+}
+
 SUMMARY_CLAIM_FIELDS = {
     "one_sentence_summary": "Finding",
+    "objective": "ResearchObjective",
+    "primary_findings": "Finding",
     "fabrication_highlights": "ProcessFinding",
     "synthesis_or_processing_insights": "ProcessFinding",
     "stability_summary": "StabilityFinding",
     "structure_composition_insights": "StructureCompositionFinding",
     "mechanism_or_interpretation": "Mechanism",
+    "limitations": "Limitation",
     "main_contribution": "Contribution",
     "interpretive_takeaways": "Finding",
     "data_quality_notes": "DataQualityClaim",
@@ -104,6 +138,48 @@ DIRECTIONAL_PATTERNS = [
 ]
 
 LEARNED_RELATION_TYPES = {rel for _, rel in DIRECTIONAL_PATTERNS}
+KG_REASONING_POLICIES = {
+    "current": {
+        "short_name": "Current",
+        "school": "Current evidence-grounded LiteratureAgent graph",
+        "meaning": "Baseline graph without an added reasoning-policy lens.",
+    },
+    "humean_evidence": {
+        "short_name": "Humean",
+        "school": "Evidence grounding and cautious induction",
+        "meaning": "Emphasizes direct evidence, evidence-linked claims, and weakly supported claims.",
+    },
+    "kantian_constraints": {
+        "short_name": "Kantian",
+        "school": "Rules, schema constraints, units, and consistency checking",
+        "meaning": "Emphasizes schema-validity, missing target fields, unit consistency, and extraction constraints.",
+    },
+    "socratic_uncertainty": {
+        "short_name": "Socratic",
+        "school": "Questioning, uncertainty, assumptions, and missing evidence",
+        "meaning": "Emphasizes uncertainty, missing evidence, research gaps, and next evidence needed.",
+    },
+    "cartesian_decomposition": {
+        "short_name": "Cartesian",
+        "school": "Stepwise decomposition, deduction, and calculation",
+        "meaning": "Emphasizes process chains, measurable steps, and device-to-metric decomposition.",
+    },
+    "aristotelian_classification": {
+        "short_name": "Aristotelian",
+        "school": "Classification, categories, definitions, and causes",
+        "meaning": "Emphasizes paper, material, device, characterization, and claim categories.",
+    },
+    "hegelian_conflict_resolution": {
+        "short_name": "Hegelian",
+        "school": "Contradiction, tension, and synthesis",
+        "meaning": "Emphasizes conflicting claims, mixed evidence, and tensions across papers.",
+    },
+    "platonic_abstraction": {
+        "short_name": "Platonic",
+        "school": "Abstraction, ideal forms, and general patterns",
+        "meaning": "Emphasizes general scientific patterns abstracted from specific claims.",
+    },
+}
 
 CLAIM_PREFIX_RE = re.compile(
     r"^(?:the\s+(?:study|work|paper|authors?)\s+(?:shows?|demonstrates?|reveals?|finds?|reports?|suggests?|"
@@ -240,6 +316,38 @@ def split_values(value: Any, stack: bool = False) -> List[str]:
     return list(dict.fromkeys(x for x in values if x and x.lower() not in MISSING))
 
 
+def json_cell(value: Any, default: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    text = clean(value)
+    if not text:
+        return default
+    try:
+        return json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def domain_attribute_values(value: Any) -> List[str]:
+    """Return stable scalar representations for an otherwise unknown domain field."""
+    parsed = value
+    if isinstance(value, str):
+        text = clean(value)
+        if not text:
+            return []
+        if text[:1] in {"[", "{"}:
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = value
+    if isinstance(parsed, list):
+        values = [json_text(item) if isinstance(item, (dict, list)) else str(item) for item in parsed]
+        return list(dict.fromkeys(item for item in values if clean(item)))
+    if isinstance(parsed, dict):
+        return [json_text(parsed)] if parsed else []
+    return split_values(parsed)
+
+
 def numeric_value(value: Any) -> Optional[float]:
     text = clean(value)
     if not text:
@@ -264,29 +372,62 @@ def xml_safe(value: Any) -> str:
     )
 
 
+def _ontology_strings(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if isinstance(item, (str, int, float)) and clean(item)]
+    return []
+
+
 def flatten_ontology(data: Any, path: Tuple[str, ...] = ()) -> Iterable[Tuple[str, str, str]]:
+    """Yield only deliberate synonym mappings from an ontology document.
+
+    New domain packs should use ``canonical_terms`` entries shaped as
+    ``{"canonical": "...", "aliases": ["..."], "category": "..."}``.
+    The narrow legacy-root branch keeps the shipped halide ontology compatible
+    without interpreting broad vocabulary lists as aliases.
+    """
+    if path and path[0] in ONTOLOGY_NON_TERM_ROOTS:
+        return
+
     if isinstance(data, dict):
+        canonical = clean(data.get("canonical"))
+        if canonical:
+            category = clean(data.get("category")) or "/".join(path[:-1] if path and path[-1].isdigit() else path)
+            terms = [canonical]
+            terms.extend(_ontology_strings(data.get("aliases")))
+            terms.extend(_ontology_strings(data.get("synonyms")))
+            for synonym in dict.fromkeys(terms):
+                yield synonym, canonical, category
+            return
+
         for key, value in data.items():
-            if key in {"version", "description"}:
+            key_text = str(key)
+            if key_text in {"id", "version", "description"}:
                 continue
-            if isinstance(value, list):
-                canonical = path[-1] if key in {"terms", "keywords", "synonyms", "aliases"} and path else str(key)
-                category = "/".join(path[:-1] if key in {"terms", "keywords", "synonyms", "aliases"} else path)
-                for synonym in value:
-                    yield str(synonym), canonical, category
-            else:
-                yield from flatten_ontology(value, path + (str(key),))
+            if not path and key_text in ONTOLOGY_NON_TERM_ROOTS:
+                continue
+            yield from flatten_ontology(value, path + (key_text,))
+        return
+
+    if isinstance(data, list):
+        if all(isinstance(item, dict) for item in data):
+            for index, item in enumerate(data):
+                yield from flatten_ontology(item, path + (str(index),))
+            return
+        if path and path[0] in LEGACY_CANONICAL_ONTOLOGY_ROOTS:
+            canonical = path[-1]
+            category = "/".join(path[:-1])
+            terms = [canonical, *_ontology_strings(data)]
+            for synonym in dict.fromkeys(terms):
+                yield synonym, canonical, category
 
 
 def ontology_index(path: Path) -> Dict[str, Dict[str, str]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     index: Dict[str, Dict[str, str]] = {}
     for synonym, canonical, category in flatten_ontology(data):
-        root = category.split("/", 1)[0]
-        # Family gates and figure-task terms are retrieval keywords, not
-        # canonical scientific entities.
-        if root in {"family_gate_terms", "figure_task_ontology", "family_ontology_map", "device_layers"}:
-            continue
         key = norm(synonym)
         if key and key not in index:
             index[key] = {"canonical": canonical, "category": category}
@@ -303,11 +444,12 @@ class GraphBuilder:
         self.ontology_usage = Counter()
         self.processed_papers: set[str] = set()
         self.claim_support = Counter()
+        self.reasoning_policy = "current"
+        self.reasoning_report_rows: List[Dict[str, Any]] = []
 
     def canonical(self, name: str) -> Tuple[str, str]:
         hit = self.ontology.get(norm(name))
-        root = hit["category"].split("/", 1)[0] if hit else ""
-        if hit and root in {"a_site_cations", "b_site_cations", "x_site_anions", "additives_passivators", "solvents"}:
+        if hit:
             self.ontology_usage[(hit["category"], hit["canonical"])] += 1
             return hit["canonical"], hit["category"]
         return name, ""
@@ -338,6 +480,261 @@ class GraphBuilder:
                 **props,
             }
         return edge_id
+
+    def apply_reasoning_policy_lens(self, policy_id: str) -> None:
+        """Add an optional reasoning-school overlay without changing the baseline graph."""
+        if policy_id in {"", "none", "current"}:
+            self.reasoning_policy = "current"
+            return
+        if policy_id not in KG_REASONING_POLICIES:
+            raise ValueError(f"Unsupported reasoning policy for KG view: {policy_id}")
+
+        self.reasoning_policy = policy_id
+        local = KG_REASONING_POLICIES[policy_id]
+        policy = REASONING_POLICIES.get(policy_id)
+        policy_node = stable_id("ReasoningPolicy", policy_id)
+        self.add_node(
+            policy_node,
+            ["ReasoningPolicy", "PolicyLens"],
+            local["short_name"],
+            policy_id=policy_id,
+            school_of_thought=getattr(policy, "school_of_thought", local["school"]),
+            simple_meaning=getattr(policy, "simple_meaning", local["meaning"]),
+            prompt_instruction=getattr(policy, "prompt_instruction", ""),
+            output_checks=" | ".join(getattr(policy, "output_checks", [])),
+        )
+
+        claim_nodes = [node for node in self.nodes.values() if "Claim" in node["labels"]]
+        paper_nodes = [node for node in self.nodes.values() if "Paper" in node["labels"]]
+        device_nodes = [node for node in self.nodes.values() if "Device" in node["labels"]]
+        measurement_nodes = [node for node in self.nodes.values() if "Measurement" in node["labels"]]
+        material_nodes = [node for node in self.nodes.values() if "Material" in node["labels"]]
+
+        if policy_id == "humean_evidence":
+            for claim in claim_nodes:
+                support = clean(claim.get("support_status")) or "unknown"
+                claim["reasoning_policy"] = policy_id
+                claim["evidence_grounding_status"] = support
+                rel = "POLICY_PRIORITIZES_EVIDENCE_LINKED_CLAIM" if support == "evidence_linked" else "POLICY_FLAGS_WEAK_EVIDENCE"
+                self.add_edge(
+                    policy_node,
+                    claim["node_id"],
+                    rel,
+                    "reasoning_policy",
+                    policy_id,
+                    evidence_support_count=claim.get("evidence_support_count", 0),
+                    visual_support_count=claim.get("visual_support_count", 0),
+                    direct_text_support_count=claim.get("direct_text_support_count", 0),
+                )
+                self.reasoning_report_rows.append({
+                    "policy_id": policy_id,
+                    "node_id": claim["node_id"],
+                    "node_type": "Claim",
+                    "status": support,
+                    "reason": "Direct evidence linked" if support == "evidence_linked" else "Claim currently depends on summary text only",
+                })
+
+        elif policy_id == "kantian_constraints":
+            for node in [*device_nodes, *measurement_nodes, *material_nodes]:
+                node["reasoning_policy"] = policy_id
+                node["constraint_checked"] = True
+                self.add_edge(policy_node, node["node_id"], "POLICY_CHECKS_SCHEMA_CONSTRAINTS", "reasoning_policy", policy_id)
+            for device in device_nodes:
+                outgoing = [edge for edge in self.edges.values() if edge["start_id"] == device["node_id"]]
+                has_performance = any(edge["type"] == "HAS_PERFORMANCE_MEASUREMENT" for edge in outgoing)
+                has_stability = any(edge["type"] == "HAS_STABILITY_TEST" for edge in outgoing)
+                if not has_performance or not has_stability:
+                    issue_text = "missing_performance_or_stability_target"
+                    issue_id = stable_id("ConstraintIssue", f"{device['node_id']}|{issue_text}")
+                    self.add_node(
+                        issue_id,
+                        ["ReasoningFinding", "ConstraintIssue"],
+                        issue_text,
+                        policy_id=policy_id,
+                        missing_performance=not has_performance,
+                        missing_stability=not has_stability,
+                    )
+                    self.add_edge(device["node_id"], issue_id, "HAS_SCHEMA_CONSTRAINT_WARNING", "reasoning_policy", policy_id)
+                    self.reasoning_report_rows.append({
+                        "policy_id": policy_id,
+                        "node_id": device["node_id"],
+                        "node_type": "Device",
+                        "status": "warning",
+                        "reason": issue_text,
+                    })
+
+        elif policy_id == "socratic_uncertainty":
+            for claim in claim_nodes:
+                support = clean(claim.get("support_status")) or "unknown"
+                if support == "evidence_linked":
+                    continue
+                gap_text = f"Need stronger evidence for: {claim.get('statement', '')[:140]}"
+                gap_id = stable_id("UncertaintyGap", f"{claim['node_id']}|{gap_text}")
+                self.add_node(
+                    gap_id,
+                    ["ReasoningFinding", "UncertaintyGap", "ResearchGap"],
+                    gap_text,
+                    policy_id=policy_id,
+                    source_claim_id=claim["node_id"],
+                    next_evidence_needed="Link claim to direct text, figure, table, or extracted measurement evidence.",
+                )
+                claim["reasoning_policy"] = policy_id
+                claim["uncertainty_flag"] = "needs_direct_evidence"
+                self.add_edge(claim["node_id"], gap_id, "HAS_UNCERTAINTY_GAP", "reasoning_policy", policy_id)
+                self.add_edge(policy_node, gap_id, "POLICY_IDENTIFIES_GAP", "reasoning_policy", policy_id)
+                self.reasoning_report_rows.append({
+                    "policy_id": policy_id,
+                    "node_id": claim["node_id"],
+                    "node_type": "Claim",
+                    "status": "needs_evidence",
+                    "reason": "Summary-only claim needs direct support before being treated as strong knowledge",
+                })
+            for paper in paper_nodes:
+                outgoing = [edge for edge in self.edges.values() if edge["start_id"] == paper["node_id"]]
+                if not any(edge["type"] in {"HAS_TEXT_EVIDENCE", "HAS_FIGURE_EVIDENCE", "ASSERTS_CLAIM"} for edge in outgoing):
+                    gap_id = stable_id("UncertaintyGap", f"{paper['node_id']}|limited_extracted_knowledge")
+                    self.add_node(
+                        gap_id,
+                        ["ReasoningFinding", "UncertaintyGap"],
+                        "Limited extracted knowledge for paper",
+                        policy_id=policy_id,
+                    )
+                    self.add_edge(paper["node_id"], gap_id, "HAS_UNCERTAINTY_GAP", "reasoning_policy", policy_id)
+                    self.reasoning_report_rows.append({
+                        "policy_id": policy_id,
+                        "node_id": paper["node_id"],
+                        "node_type": "Paper",
+                        "status": "limited_knowledge",
+                        "reason": "Paper has little linked claim/evidence structure in current KG",
+                    })
+
+        elif policy_id == "cartesian_decomposition":
+            for device in device_nodes:
+                related_edges = [edge for edge in self.edges.values() if edge["start_id"] == device["node_id"]]
+                ordered_types = [
+                    ("USES_ABSORBER", "absorber material"),
+                    ("FABRICATED_BY", "fabrication/process"),
+                    ("HAS_PERFORMANCE_MEASUREMENT", "performance metric"),
+                    ("HAS_STABILITY_TEST", "stability test"),
+                ]
+                previous_step = None
+                for step_number, (rel_type, step_name) in enumerate(ordered_types, start=1):
+                    if not any(edge["type"] == rel_type for edge in related_edges):
+                        continue
+                    step_id = stable_id("ReasoningStep", f"{device['node_id']}|{policy_id}|{step_number}|{rel_type}")
+                    self.add_node(
+                        step_id,
+                        ["ReasoningFinding", "DecompositionStep"],
+                        f"{step_number}. {step_name}",
+                        policy_id=policy_id,
+                        step_number=step_number,
+                        relationship_type=rel_type,
+                    )
+                    self.add_edge(policy_node, step_id, "POLICY_DECOMPOSES_STEP", "reasoning_policy", policy_id)
+                    self.add_edge(device["node_id"], step_id, "HAS_DECOMPOSITION_STEP", "reasoning_policy", policy_id)
+                    if previous_step:
+                        self.add_edge(previous_step, step_id, "NEXT_REASONING_STEP", "reasoning_policy", policy_id)
+                    previous_step = step_id
+                    self.reasoning_report_rows.append({
+                        "policy_id": policy_id,
+                        "node_id": device["node_id"],
+                        "node_type": "Device",
+                        "status": "decomposed",
+                        "reason": f"Device construction decomposed through {step_name}",
+                    })
+
+        elif policy_id == "aristotelian_classification":
+            for node in [*paper_nodes, *device_nodes, *material_nodes, *measurement_nodes, *claim_nodes]:
+                primary = sorted(node["labels"])[0] if node.get("labels") else "Entity"
+                if "Claim" in node.get("labels", set()):
+                    primary = clean(node.get("claim_type")) or "Claim"
+                category_id = stable_id("ReasoningCategory", f"{policy_id}|{primary}")
+                self.add_node(
+                    category_id,
+                    ["ReasoningFinding", "ReasoningCategory"],
+                    primary,
+                    policy_id=policy_id,
+                    category_basis="node_label_or_claim_type",
+                )
+                self.add_edge(node["node_id"], category_id, "BELONGS_TO_REASONING_CATEGORY", "reasoning_policy", policy_id)
+            self.reasoning_report_rows.append({
+                "policy_id": policy_id,
+                "node_id": policy_node,
+                "node_type": "ReasoningPolicy",
+                "status": "classified",
+                "reason": "Graph entities grouped by definitions, paper/material/device roles, and claim types",
+            })
+
+        elif policy_id == "hegelian_conflict_resolution":
+            claim_by_pair: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+            opposite = {
+                "IMPROVES": {"REDUCES", "INHIBITS"},
+                "PROMOTES": {"REDUCES", "INHIBITS"},
+                "INCREASES": {"REDUCES"},
+                "REDUCES": {"IMPROVES", "PROMOTES", "INCREASES"},
+                "INHIBITS": {"IMPROVES", "PROMOTES"},
+            }
+            for edge in self.edges.values():
+                if edge["type"] in LEARNED_RELATION_TYPES:
+                    claim_by_pair[(edge["start_id"], edge["end_id"])].append(edge)
+            for (subject_id, object_id), rels in claim_by_pair.items():
+                rel_types = {edge["type"] for edge in rels}
+                has_tension = any(bool(opposite.get(rel, set()) & rel_types) for rel in rel_types)
+                mixed_support = len({edge.get("assertion_status", "") for edge in rels}) > 1 or len(rels) > 1
+                if not has_tension and not mixed_support:
+                    continue
+                tension_id = stable_id("ReasoningTension", f"{subject_id}|{object_id}|{sorted(rel_types)}")
+                self.add_node(
+                    tension_id,
+                    ["ReasoningFinding", "Tension", "ConflictOrSynthesis"],
+                    "Tension between reported relationships",
+                    policy_id=policy_id,
+                    relationship_types=";".join(sorted(rel_types)),
+                    relation_count=len(rels),
+                    has_direct_opposition=has_tension,
+                )
+                self.add_edge(policy_node, tension_id, "POLICY_IDENTIFIES_TENSION", "reasoning_policy", policy_id)
+                self.add_edge(subject_id, tension_id, "HAS_RELATIONSHIP_TENSION", "reasoning_policy", policy_id)
+                self.add_edge(tension_id, object_id, "TENSION_CONCERNS", "reasoning_policy", policy_id)
+                self.reasoning_report_rows.append({
+                    "policy_id": policy_id,
+                    "node_id": tension_id,
+                    "node_type": "Tension",
+                    "status": "tension",
+                    "reason": f"Relationship set contains {', '.join(sorted(rel_types))}",
+                })
+
+        elif policy_id == "platonic_abstraction":
+            abstraction_rules = [
+                ("performance_improvement", ["pce", "efficiency", "performance", "voc", "jsc", "fill factor"]),
+                ("stability_retention", ["stability", "retention", "t80", "t95", "lifetime", "aging"]),
+                ("interface_passivation", ["interface", "passivation", "defect", "trap", "recombination"]),
+                ("composition_dimensionality", ["composition", "cation", "halide", "2d", "3d", "dimensional"]),
+                ("processing_control", ["anneal", "solvent", "deposition", "processing", "crystallization"]),
+            ]
+            for claim in claim_nodes:
+                text = f"{claim.get('statement', '')} {claim.get('claim_type', '')}".lower()
+                matched = [name for name, terms in abstraction_rules if any(term in text for term in terms)]
+                if not matched:
+                    matched = ["general_literature_pattern"]
+                for abstraction in matched:
+                    abs_id = stable_id("AbstractPrinciple", f"{policy_id}|{abstraction}")
+                    self.add_node(
+                        abs_id,
+                        ["ReasoningFinding", "AbstractPrinciple"],
+                        abstraction,
+                        policy_id=policy_id,
+                        abstraction_basis="claim_text_keyword_pattern",
+                    )
+                    self.add_edge(claim["node_id"], abs_id, "INSTANTIATES_ABSTRACT_PATTERN", "reasoning_policy", policy_id)
+                    self.add_edge(policy_node, abs_id, "POLICY_ABSTRACTS_PATTERN", "reasoning_policy", policy_id)
+                self.reasoning_report_rows.append({
+                    "policy_id": policy_id,
+                    "node_id": claim["node_id"],
+                    "node_type": "Claim",
+                    "status": "abstracted",
+                    "reason": "Claim grouped into one or more abstract scientific principles",
+                })
 
     def paper_id(self, row: pd.Series) -> str:
         doi = clean(row.get("Ref_DOI_number"))
@@ -450,13 +847,13 @@ class GraphBuilder:
         summary: Dict[str, Any],
         summary_path: Path,
     ) -> None:
-        system = summary.get("perovskite_system")
+        system = summary.get("perovskite_system") or summary.get("system_or_subject") or summary.get("oxide_composition_and_structure")
         if not system:
             return
         if isinstance(system, dict):
-            composition = clean(system.get("composition")) or clean(summary.get("materials_focus")) or "Summary-extracted material system"
+            composition = clean(system.get("composition")) or clean(system.get("formula")) or clean(summary.get("materials_focus")) or "Summary-extracted material system"
             properties = {
-                "composition": clean(system.get("composition")),
+                "composition": clean(system.get("composition")) or clean(system.get("formula")),
                 "dimensionality": clean(system.get("dimensionality")),
                 "spacer_additive": clean(system.get("spacer/additive")),
                 "chemistry": clean(system.get("A/B/halide chemistry")),
@@ -474,7 +871,7 @@ class GraphBuilder:
             source_path=str(summary_path),
             **properties,
         )
-        self.add_edge(paper_id, system_id, "STUDIES_MATERIAL_SYSTEM", "perovskite_system", record_id, source_path=str(summary_path))
+        self.add_edge(paper_id, system_id, "STUDIES_SYSTEM", "system_or_subject", record_id, source_path=str(summary_path))
         for key, relation in [
             ("dimensionality", "HAS_SUMMARY_DIMENSIONALITY"),
             ("spacer_additive", "HAS_SUMMARY_SPACER_ADDITIVE"),
@@ -699,11 +1096,20 @@ class GraphBuilder:
             source_pdf_url=clean(row.get("_source_pdf_url")),
             source_landing_page=clean(row.get("_source_landing_page")),
             **artifacts,
+            domain_profile=clean(row.get("_domain_profile")) or "halide_pv",
         )
         if paper_type:
             type_id = stable_id("PaperType", paper_type)
             self.add_node(type_id, ["PaperType"], paper_type)
             self.add_edge(paper_id, type_id, "CLASSIFIED_AS", "Ref_free_text_comment", record_id)
+
+        domain_profile = clean(row.get("_domain_profile")) or "halide_pv"
+        if domain_profile != "halide_pv":
+            self.add_domain_record(paper_id, paper_slug, record_id, row, domain_profile)
+            if paper_id not in self.processed_papers:
+                self.add_paper_knowledge(paper_id, paper_slug, record_id)
+                self.processed_papers.add(paper_id)
+            return
 
         device_id = stable_id("Device", record_id)
         self.add_node(
@@ -801,14 +1207,170 @@ class GraphBuilder:
             self.add_paper_knowledge(paper_id, paper_slug, record_id)
             self.processed_papers.add(paper_id)
 
-    def write(self, out_dir: Path) -> None:
+    def add_domain_record(
+        self, paper_id: str, paper_slug: str, record_id: str, row: pd.Series, domain_profile: str
+    ) -> None:
+        """Build a domain-neutral record subgraph, with oxide-specific relations when available."""
+        raw_system_name = clean(row.get("Domain_system_or_subject")) or clean(row.get("Domain_composition_formula")) or paper_slug
+        system_name, system_category = self.canonical(raw_system_name)
+        system_id = stable_id("StudiedSystem", f"{domain_profile}|{system_name}")
+        labels = ["StudiedSystem", "DomainEntity"]
+        if domain_profile == "oxide_perovskite":
+            labels += ["MaterialSystem", "OxidePerovskite"]
+        self.add_node(
+            system_id,
+            labels,
+            system_name,
+            domain_profile=domain_profile,
+            raw_name=raw_system_name,
+            ontology_category=system_category,
+        )
+        self.add_edge(paper_id, system_id, "STUDIES_SYSTEM", "Domain_system_or_subject", record_id)
+        field_targets: Dict[str, List[str]] = defaultdict(list)
+        field_targets["Domain_system_or_subject"].append(system_id)
+
+        for entity in split_values(row.get("Domain_materials_or_entities")):
+            canonical, category = self.canonical(entity)
+            entity_id = stable_id("DomainEntity", canonical)
+            self.add_node(
+                entity_id,
+                ["DomainEntity", "ScientificConcept"],
+                canonical,
+                raw_name=entity,
+                ontology_category=category,
+            )
+            self.add_edge(system_id, entity_id, "INCLUDES_ENTITY", "Domain_materials_or_entities", record_id)
+            field_targets["Domain_materials_or_entities"].append(entity_id)
+
+        common_fields = [
+            ("Domain_methods", "USES_METHOD", "Method"),
+            ("Domain_conditions", "HAS_CONDITION", "ExperimentalCondition"),
+            ("Domain_intervention_or_variable", "TESTS_VARIABLE", "ScientificVariable"),
+            ("Domain_comparison", "USES_COMPARISON", "Comparison"),
+            ("Domain_processing_steps", "PROCESSED_BY", "Process"),
+            ("Domain_characterization", "USES_CHARACTERIZATION", "Characterization"),
+            ("Domain_defect_chemistry", "HAS_DEFECT_CHEMISTRY", "DefectChemistry"),
+            ("Domain_microstructure", "HAS_MICROSTRUCTURE", "Microstructure"),
+        ]
+        for field, relation, label in common_fields:
+            for value in split_values(row.get(field)):
+                canonical, category = self.canonical(value)
+                node_id = stable_id(label, canonical)
+                self.add_node(
+                    node_id,
+                    [label, "DomainEntity"],
+                    canonical,
+                    raw_name=value,
+                    ontology_category=category,
+                )
+                self.add_edge(system_id if field.startswith("Domain_") else paper_id, node_id, relation, field, record_id)
+                field_targets[field].append(node_id)
+
+        oxide_fields = [
+            ("Domain_composition_formula", "HAS_COMPOSITION", "Composition"),
+            ("Domain_a_site_species", "HAS_A_SITE_SPECIES", "Chemical"),
+            ("Domain_b_site_species", "HAS_B_SITE_SPECIES", "Chemical"),
+            ("Domain_substitutions_or_dopants", "HAS_SUBSTITUTION_OR_DOPANT", "Chemical"),
+            ("Domain_oxygen_stoichiometry", "HAS_OXYGEN_STOICHIOMETRY", "Stoichiometry"),
+            ("Domain_oxidation_states", "HAS_OXIDATION_STATE", "OxidationState"),
+            ("Domain_crystal_structure", "HAS_CRYSTAL_STRUCTURE", "CrystalStructure"),
+            ("Domain_space_group", "HAS_SPACE_GROUP", "SpaceGroup"),
+            ("Domain_phases", "HAS_PHASE", "MaterialPhase"),
+            ("Domain_atmosphere", "PROCESSED_UNDER", "ExperimentalCondition"),
+            ("Domain_temperatures", "PROCESSED_AT_TEMPERATURE", "ExperimentalCondition"),
+        ]
+        for field, relation, label in oxide_fields:
+            for value in split_values(row.get(field)):
+                canonical, category = self.canonical(value)
+                node_id = stable_id(label, canonical)
+                self.add_node(node_id, [label, "DomainEntity"], canonical, raw_name=value, ontology_category=category)
+                self.add_edge(system_id, node_id, relation, field, record_id)
+                field_targets[field].append(node_id)
+
+        for field in ("Domain_measurements", "Domain_measured_properties"):
+            items = json_cell(row.get(field), [])
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                name = clean(item.get("name")) or clean(item.get("property")) or "measurement"
+                value = clean(item.get("value"))
+                unit = clean(item.get("unit"))
+                context = clean(item.get("context")) or clean(item.get("conditions"))
+                measurement_id = stable_id("DomainMeasurement", f"{record_id}|{name}|{value}|{unit}|{context}")
+                self.add_node(
+                    measurement_id,
+                    ["Measurement", "DomainMeasurement"],
+                    name,
+                    value=value,
+                    unit=unit,
+                    context=context,
+                    domain_profile=domain_profile,
+                )
+                self.add_edge(system_id, measurement_id, "HAS_MEASUREMENT", field, record_id)
+                field_targets[field].append(measurement_id)
+
+        mapped_fields = {
+            "Domain_system_or_subject",
+            "Domain_materials_or_entities",
+            *(field for field, _, _ in common_fields),
+            *(field for field, _, _ in oxide_fields),
+            "Domain_measurements",
+            "Domain_measured_properties",
+        }
+        for raw_field, raw_value in row.items():
+            field = str(raw_field)
+            if not field.startswith("Domain_") or field in mapped_fields:
+                continue
+            for value in domain_attribute_values(raw_value):
+                canonical, category = self.canonical(value)
+                node_id = stable_id("DomainAttribute", f"{field}|{canonical}")
+                self.add_node(
+                    node_id,
+                    ["DomainAttribute", "DomainEntity"],
+                    canonical,
+                    domain_field=field,
+                    domain_profile=domain_profile,
+                    raw_name=value,
+                    ontology_category=category,
+                )
+                self.add_edge(
+                    system_id,
+                    node_id,
+                    "HAS_DOMAIN_ATTRIBUTE",
+                    field,
+                    record_id,
+                    domain_field=field,
+                )
+                field_targets[field].append(node_id)
+
+        for field, targets in field_targets.items():
+            evidence = clean(row.get(f"_evidence_{field}"))
+            if not evidence:
+                continue
+            evidence_id = stable_id("DomainEvidence", f"{paper_slug}|{field}|{evidence}")
+            self.add_node(
+                evidence_id,
+                ["Evidence", "TextEvidence", "DomainEvidence"],
+                evidence[:120],
+                evidence_text=evidence,
+                evidence_field=field,
+            )
+            self.add_edge(paper_id, evidence_id, "HAS_TEXT_EVIDENCE", field, record_id)
+            for target in targets:
+                self.add_edge(evidence_id, target, "SUPPORTS_ENTITY_OR_MEASUREMENT", field, record_id)
+
+    def write(self, out_dir: Path, portable_formats: Sequence[str] = ()) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
+        portable_formats = tuple(dict.fromkeys(portable_formats))
         neo4j_dir = out_dir / "neo4j_import"
         portable_dir = out_dir / "portable"
         reports_dir = out_dir / "reports"
         views_dir = out_dir / "derived_views"
         plots_dir = out_dir / "plots"
-        for path in [neo4j_dir, portable_dir, reports_dir, views_dir, plots_dir]:
+        output_dirs = [neo4j_dir, reports_dir, views_dir, plots_dir]
+        if portable_formats:
+            output_dirs.append(portable_dir)
+        for path in output_dirs:
             path.mkdir(parents=True, exist_ok=True)
 
         node_rows = []
@@ -835,31 +1397,33 @@ class GraphBuilder:
         pd.DataFrame(node_rows).to_csv(neo4j_dir / "nodes.csv", index=False)
         pd.DataFrame(edge_rows).to_csv(neo4j_dir / "relationships.csv", index=False)
 
-        with (portable_dir / "graph.jsonl").open("w", encoding="utf-8") as handle:
-            for node in self.nodes.values():
-                serial = {**node, "labels": sorted(node["labels"])}
-                handle.write(json_text({"kind": "node", **serial}) + "\n")
-            for edge in self.edges.values():
-                handle.write(json_text({"kind": "relationship", **edge}) + "\n")
+        if "jsonl" in portable_formats:
+            with (portable_dir / "graph.jsonl").open("w", encoding="utf-8") as handle:
+                for node in self.nodes.values():
+                    serial = {**node, "labels": sorted(node["labels"])}
+                    handle.write(json_text({"kind": "node", **serial}) + "\n")
+                for edge in self.edges.values():
+                    handle.write(json_text({"kind": "relationship", **edge}) + "\n")
 
-        graph = nx.MultiDiGraph()
-        for node in self.nodes.values():
-            graph.add_node(
-                node["node_id"],
-                labels=xml_safe(";".join(sorted(node["labels"]))),
-                name=xml_safe(node.get("name", "")),
-                properties_json=xml_safe(json_text({k: v for k, v in node.items() if k not in {"node_id", "labels", "name"}})),
-            )
-        for edge in self.edges.values():
-            graph.add_edge(
-                edge["start_id"],
-                edge["end_id"],
-                key=edge["relationship_id"],
-                type=xml_safe(edge["type"]),
-                source_field=xml_safe(edge.get("source_field", "")),
-                source_record_id=xml_safe(edge.get("source_record_id", "")),
-            )
-        nx.write_graphml(graph, portable_dir / "literature_knowledge_graph.graphml")
+        if "graphml" in portable_formats:
+            graph = nx.MultiDiGraph()
+            for node in self.nodes.values():
+                graph.add_node(
+                    node["node_id"],
+                    labels=xml_safe(";".join(sorted(node["labels"]))),
+                    name=xml_safe(node.get("name", "")),
+                    properties_json=xml_safe(json_text({k: v for k, v in node.items() if k not in {"node_id", "labels", "name"}})),
+                )
+            for edge in self.edges.values():
+                graph.add_edge(
+                    edge["start_id"],
+                    edge["end_id"],
+                    key=edge["relationship_id"],
+                    type=xml_safe(edge["type"]),
+                    source_field=xml_safe(edge.get("source_field", "")),
+                    source_record_id=xml_safe(edge.get("source_record_id", "")),
+                )
+            nx.write_graphml(graph, portable_dir / "literature_knowledge_graph.graphml")
 
         node_counts = Counter(label for node in self.nodes.values() for label in node["labels"])
         rel_counts = Counter(edge["type"] for edge in self.edges.values())
@@ -870,6 +1434,8 @@ class GraphBuilder:
         learned_edges = [edge for edge in self.edges.values() if edge["type"] in LEARNED_RELATION_TYPES]
         summary = {
             "graph_model": "evidence-grounded claim-centered scientific property graph",
+            "reasoning_policy": self.reasoning_policy,
+            "portable_formats": list(portable_formats),
             "nodes": len(self.nodes),
             "relationships": len(self.edges),
             "scientific_claims": len(claim_nodes),
@@ -887,6 +1453,17 @@ class GraphBuilder:
         pd.DataFrame([{"relationship_type": k, "count": v} for k, v in rel_counts.most_common()]).to_csv(reports_dir / "relationship_counts_by_type.csv", index=False)
         pd.DataFrame([{"ontology_category": k[0], "canonical_term": k[1], "usage_count": v} for k, v in self.ontology_usage.most_common()]).to_csv(reports_dir / "ontology_term_usage.csv", index=False)
         pd.DataFrame([{"relationship_id": x} for x in dangling]).to_csv(reports_dir / "dangling_relationships.csv", index=False)
+        pd.DataFrame(self.reasoning_report_rows).to_csv(reports_dir / "reasoning_policy_findings.csv", index=False)
+        pd.DataFrame([{
+            "reasoning_policy": self.reasoning_policy,
+            "nodes": len(self.nodes),
+            "relationships": len(self.edges),
+            "scientific_claims": len(claim_nodes),
+            "learned_directional_relationships": len(learned_edges),
+            "evidence_linked_claims": support_counts.get("evidence_linked", 0),
+            "summary_only_claims": support_counts.get("summary_only", 0),
+            "reasoning_findings": len(self.reasoning_report_rows),
+        }]).to_csv(reports_dir / "reasoning_policy_summary.csv", index=False)
         pd.DataFrame([
             {
                 "claim_id": node["node_id"],
@@ -1068,7 +1645,16 @@ class GraphBuilder:
             fig.savefig(plots_dir / "learned_scientific_relationships.png", bbox_inches="tight")
             plt.close(fig)
 
-        readme = f"""LiteratureAgent Knowledge Graph
+        portable_readme_lines = []
+        if "jsonl" in portable_formats:
+            portable_readme_lines.append("- portable/graph.jsonl")
+        if "graphml" in portable_formats:
+            portable_readme_lines.append("- portable/literature_knowledge_graph.graphml")
+        portable_readme = "\n".join(portable_readme_lines)
+        if not portable_readme:
+            portable_readme = "- No portable export requested for this build."
+
+        readme = f"""LiteratureAgent Scientific Knowledge Graph
 ================================
 
 Canonical model: evidence-grounded claim-centered scientific property graph.
@@ -1079,6 +1665,7 @@ Why this model:
 - Property-graph relationships can carry source fields, record IDs, and evidence paths.
 
 Graph summary:
+- Reasoning policy: {self.reasoning_policy}
 - Nodes: {len(self.nodes)}
 - Relationships: {len(self.edges)}
 - Scientific claims: {len(claim_nodes)}
@@ -1095,14 +1682,21 @@ Open first:
 - plots/learned_scientific_relationships.png
 - reports/claim_catalog.csv
 - reports/claims_without_linked_evidence.csv
+- reports/reasoning_policy_summary.csv
+- reports/reasoning_policy_findings.csv
 - neo4j_import/nodes.csv
 - neo4j_import/relationships.csv
-- portable/literature_knowledge_graph.graphml
 - derived_views/sankey_schema_flows.csv
 - derived_views/material_process_performance_dag_edges.csv
 - derived_views/learned_scientific_relationships.csv
 - derived_views/cross_paper_relationship_patterns.csv
 - derived_views/paper_knowledge_cards.jsonl
+
+Portable exports:
+{portable_readme}
+
+Portable JSONL and GraphML are optional. Use `--portable-formats` only when an
+external consumer specifically requires one of them.
 
 Neo4j import:
 The CSV files use Neo4j bulk-import headers (:ID, :LABEL, :START_ID, :END_ID, :TYPE).
@@ -1113,12 +1707,25 @@ Directional scientific relationships are reported paper claims, not assumed univ
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build an evidence-grounded perovskite literature knowledge graph.")
+    parser = argparse.ArgumentParser(description="Build an evidence-grounded scientific literature knowledge graph.")
     parser.add_argument("--records", required=True, help="LiteratureAgent all_records.csv")
-    parser.add_argument("--ontology", required=True, help="Perovskite ontology JSON")
+    parser.add_argument("--ontology", required=True, help="Domain ontology JSON")
     parser.add_argument("--work-dir", required=True, help="LiteratureAgent output directory containing evidence artifacts")
     parser.add_argument("--out", required=True, help="Knowledge-graph output directory")
     parser.add_argument("--max-records", type=int, default=0, help="Optional test limit; 0 processes all records")
+    parser.add_argument(
+        "--reasoning-policy",
+        default="current",
+        choices=sorted(KG_REASONING_POLICIES),
+        help="Optional reasoning-school overlay for local POLARIS policy testing",
+    )
+    parser.add_argument(
+        "--portable-formats",
+        nargs="*",
+        choices=("jsonl", "graphml"),
+        default=(),
+        help="Optional portable exports. The default build writes none.",
+    )
     args = parser.parse_args()
 
     records_path = Path(args.records)
@@ -1131,8 +1738,10 @@ def main() -> None:
     builder = GraphBuilder(ontology_index(ontology_path), records_path, work_dir)
     for row_index, row in df.iterrows():
         builder.add_record(row, int(row_index))
-    builder.write(out_dir)
+    builder.apply_reasoning_policy_lens(args.reasoning_policy)
+    builder.write(out_dir, args.portable_formats)
     print(f"Knowledge graph written to: {out_dir.resolve()}")
+    print(f"Reasoning policy: {builder.reasoning_policy}")
     print(f"Nodes: {len(builder.nodes):,} | Relationships: {len(builder.edges):,}")
 
 

@@ -78,6 +78,38 @@ def normalize_domain_profile(value: Any) -> str:
     return profile
 
 
+def _resolve_request_ontology_path(value: Any) -> str:
+    """Resolve an API-supplied ontology without permitting backend file escape."""
+    raw_path = str(value or "").strip()
+    if not raw_path:
+        raise ValueError("ontology_path must be a non-empty backend-local JSON path")
+
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = _BACKEND_ROOT / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(
+            "ontology_path must reference an existing, readable backend-local JSON file"
+        ) from exc
+
+    backend_root = _BACKEND_ROOT.resolve()
+    if not resolved.is_relative_to(backend_root):
+        raise ValueError("ontology_path must stay within the POLARIS backend directory")
+    if resolved.suffix.lower() != ".json" or not resolved.is_file() or not os.access(resolved, os.R_OK):
+        raise ValueError(
+            "ontology_path must reference an existing, readable backend-local JSON file"
+        )
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("ontology_path must contain valid UTF-8 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("ontology_path must contain one top-level JSON object")
+    return str(resolved)
+
+
 @dataclass
 class LiteratureAgentConfig:
     controller: str = str(_LITERATURE_ROOT / "controller" / "literature_agent_full_end_to_end_v21_3_english_sanitizer.py")
@@ -94,6 +126,7 @@ class LiteratureAgentConfig:
     llm_model: str = "qwen2.5:7b"
     vision_model: str = "qwen2.5vl:7b-q4_K_M"
     domain_profile: str = HALIDE_PV_DOMAIN_PROFILE
+    knowledge_graph_builder: str = str(_LITERATURE_ROOT / "scripts" / "build_literature_knowledge_graph.py")
 
     def __post_init__(self) -> None:
         self.domain_profile = normalize_domain_profile(self.domain_profile)
@@ -112,7 +145,7 @@ class LiteratureAgentConfig:
             path_fields = {
                 "controller", "base_csv", "ontology_path", "work_dir",
                 "integration_out_dir", "model_script", "model_out_dir",
-                "knowledge_graph_out_dir", "job_dir",
+                "knowledge_graph_out_dir", "job_dir", "knowledge_graph_builder",
             }
             for field_name in path_fields:
                 value = payload.get(field_name)
@@ -128,6 +161,7 @@ class LiteratureAgentConfig:
             "model_script": "LITERATURE_AGENT_MODEL_SCRIPT",
             "model_out_dir": "LITERATURE_AGENT_MODEL_DIR",
             "knowledge_graph_out_dir": "LITERATURE_AGENT_KG_DIR",
+            "knowledge_graph_builder": "LITERATURE_AGENT_KG_BUILDER",
             "job_dir": "LITERATURE_AGENT_JOB_DIR",
         }
         for field_name, env_name in env_map.items():
@@ -161,6 +195,7 @@ class LiteratureAgentService:
             "controller": self.config.controller,
             "base_csv": self.config.base_csv,
             "ontology_path": self.config.ontology_path,
+            "knowledge_graph_builder": self.config.knowledge_graph_builder,
             "work_dir": self.config.work_dir,
             "all_records": str(Path(self.config.work_dir) / "csv" / "all_records.csv"),
             "summaries": str(Path(self.config.work_dir) / "paper_summaries_text"),
@@ -168,7 +203,7 @@ class LiteratureAgentService:
         }
         checks = {name: Path(value).exists() for name, value in paths.items()}
         return {
-            "ok": checks["controller"] and checks["work_dir"],
+            "ok": checks["controller"] and checks["knowledge_graph_builder"] and checks["work_dir"],
             "service": "LiteratureAgent",
             "domain_profile": self.config.domain_profile,
             "domain_profiles": sorted(DOMAIN_PROFILES),
@@ -186,6 +221,9 @@ class LiteratureAgentService:
         domain_profile = normalize_domain_profile(
             request.get("domain_profile") or self.config.domain_profile
         )
+        ontology_path = self.config.ontology_path
+        if request.get("ontology_path") is not None:
+            ontology_path = _resolve_request_ontology_path(request["ontology_path"])
         extraction_profile = str(request.get("extraction_profile", "none") or "none")
         if extraction_profile not in EXTRACTION_PROFILES:
             raise ValueError(f"Unsupported extraction_profile: {extraction_profile}")
@@ -204,7 +242,8 @@ class LiteratureAgentService:
             "--pipeline_stage", stage,
             "--domain_profile", domain_profile,
             "--base_csv", self.config.base_csv,
-            "--ontology_path", self.config.ontology_path,
+            "--ontology_path", ontology_path,
+            "--knowledge_graph_builder", self.config.knowledge_graph_builder,
             "--work_dir", self.config.work_dir,
             "--integration_out_dir", self.config.integration_out_dir,
             "--model_script", self.config.model_script,

@@ -11,13 +11,15 @@
   "version": "v21.4-polaris-live-adapter",
   "execution": {
     "mode": "durable_subprocess_jobs",
-    "job_state": "E:\\LiteratureAgent\\polaris_jobs",
+    "job_state": "configured by config/literature_agent.json or LITERATURE_AGENT_JOB_DIR",
+    "knowledge_graph_builder": "literature_agent/scripts/build_literature_knowledge_graph.py",
     "stages": [
       "extract_batch",
       "vision_pass",
       "sanitize_summaries",
       "integrate_and_model",
-      "knowledge_graph"
+      "knowledge_graph",
+      "evidence_packet"
     ]
   },
   "tools": {
@@ -47,6 +49,7 @@
     "search_expansion_uses_google_drive": false,
     "strict_family_gating": true,
     "non_halide_family_gating": "off",
-    "pce_integration_domain": "halide_pv"
+    "pce_integration_domain": "halide_pv",
+    "request_ontology_scope": "existing readable JSON within the backend directory"
   }
 }

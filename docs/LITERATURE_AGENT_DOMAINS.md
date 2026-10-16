@@ -15,22 +15,28 @@ Set the backend default in `config/literature_agent.json`:
 ```json
 {
   "domain_profile": "general_science",
-  "ontology_path": "../literature_agent/config/domain_packs/general_science.json"
+  "ontology_path": "../literature_agent/config/domain_packs/general_science.json",
+  "knowledge_graph_builder": "../literature_agent/scripts/build_literature_knowledge_graph.py"
 }
 ```
 
 Alternatively, set `LITERATURE_AGENT_DOMAIN_PROFILE`. The environment variable
 overrides the JSON default. The configured `ontology_path` must point to the
 ontology/domain pack that matches the selected default profile.
+`LITERATURE_AGENT_KG_BUILDER` can override the bundled knowledge-graph builder,
+but normal standalone bundles should leave it unset so the portable config path
+is used.
 
 ## Request-level selection
 
-`POST /api/v1/literature/start_stage` accepts an optional `domain_profile`:
+`POST /api/v1/literature/start_stage` accepts optional `domain_profile` and
+`ontology_path` values:
 
 ```json
 {
   "stage": "extract_batch",
   "domain_profile": "general_science",
+  "ontology_path": "literature_agent/config/domain_packs/general_science.json",
   "search_query": "solid electrolyte interface spectroscopy",
   "max_papers": 25,
   "extraction_profile": "general_literature"
@@ -41,6 +47,13 @@ If `domain_profile` is omitted, the configured backend default is used. Existing
 clients therefore continue to run `halide_pv` with
 `pce_stability_modeling` and strict family gating unless the backend default is
 changed.
+
+An omitted `ontology_path` uses the backend configuration. A request override
+may be absolute or relative to the POLARIS backend root, but it must resolve to
+an existing, readable, valid JSON file inside that backend directory. Paths
+outside the backend are rejected before a subprocess starts. This keeps custom
+domain packs deployable with the bundle without allowing the API to read
+arbitrary host files.
 
 For `general_science` and `oxide_perovskite`, POLARIS always sends
 `--family_gating off`; a caller cannot accidentally apply the photovoltaic
@@ -60,5 +73,12 @@ for each domain. Request-level selection changes the controller contract for one
 job; it does not relocate or erase existing artifacts.
 
 The configured controller must include the matching LiteratureAgent domain-pack
-assets. Health output reports both the configured `domain_profile` and the list
-of supported profile identifiers.
+assets. The bundled generic knowledge-graph builder creates domain-neutral
+`StudiedSystem`, `DomainEntity`, measurement, attribute, and evidence nodes for
+non-halide records. Unrecognized `Domain_*` columns are retained as
+`DomainAttribute` nodes, so a custom structured-output contract does not silently
+disappear from the graph. Domain-specific relations can still be added to
+`add_domain_record` when a generic attribute edge is not expressive enough.
+
+Health output reports the configured `domain_profile`, supported profiles, and
+resolved controller, ontology, and knowledge-graph-builder paths/checks.

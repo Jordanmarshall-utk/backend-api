@@ -71,6 +71,7 @@ class StartStageRequest(BaseModel):
     extraction_profile: str | None = None
     family_gating: str | None = None
     domain_profile: str | None = None
+    ontology_path: str | None = None
 
 
 class EvidencePacketRequest(BaseModel):
@@ -93,6 +94,7 @@ def get_literature_health(
             "domain_profile": health.get("domain_profile"),
             "domain_profiles": health.get("domain_profiles", sorted(VALID_DOMAIN_PROFILES)),
             "active_jobs": health.get("active_jobs", []),
+            "paths": health.get("paths", {}),
             "path_checks": health.get("path_checks", {}),
         }
     except Exception:
@@ -101,6 +103,7 @@ def get_literature_health(
             "domain_profile": None,
             "domain_profiles": sorted(VALID_DOMAIN_PROFILES),
             "active_jobs": [],
+            "paths": {},
             "path_checks": {},
         }
 
@@ -206,6 +209,7 @@ def start_literature_stage(
                 "extraction_profile": extraction_profile,
                 "family_gating": family_gating,
                 "domain_profile": domain_profile,
+                "ontology_path": body.ontology_path,
                 "disable_google_drive": True,
             },
         )

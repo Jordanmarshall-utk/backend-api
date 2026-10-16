@@ -3,6 +3,7 @@
   "controller": "../literature_agent/controller/literature_agent_full_end_to_end_v21_3_english_sanitizer.py",
   "base_csv": "../data/Perovskite_database_content_all_data.csv",
   "ontology_path": "../literature_agent/config/perovskite_ontology_library_v19.json",
+  "knowledge_graph_builder": "../literature_agent/scripts/build_literature_knowledge_graph.py",
   "work_dir": "../../runtime/literature_agent/outputs",
   "integration_out_dir": "../../runtime/literature_agent/integration",
   "model_script": "../literature_agent/models/pce_then_stability_same_approach.py",

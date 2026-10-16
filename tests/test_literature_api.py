@@ -23,7 +23,8 @@ def svc():
         "domain_profile": "halide_pv",
         "domain_profiles": ["general_science", "halide_pv", "oxide_perovskite"],
         "active_jobs": [],
-        "path_checks": {},
+        "paths": {"knowledge_graph_builder": "literature_agent/scripts/build_literature_knowledge_graph.py"},
+        "path_checks": {"knowledge_graph_builder": True},
     }
     m.search.return_value = [
         {
@@ -65,6 +66,8 @@ def test_health_ok(svc):
     assert data["domain_profile"] == "halide_pv"
     assert "general_science" in data["domain_profiles"]
     assert "active_jobs" in data
+    assert data["path_checks"]["knowledge_graph_builder"] is True
+    assert "knowledge_graph_builder" in data["paths"]
 
 
 def test_search_returns_hits(svc):
@@ -122,6 +125,7 @@ def test_start_stage_valid(svc):
     assert request["domain_profile"] == "halide_pv"
     assert request["extraction_profile"] == "pce_stability_modeling"
     assert request["family_gating"] == "strict"
+    assert request["ontology_path"] is None
 
 
 def test_start_stage_non_halide_uses_general_profile_and_non_pv_gating(svc):
@@ -139,6 +143,7 @@ def test_start_stage_non_halide_uses_general_profile_and_non_pv_gating(svc):
             json={
                 "stage": "extract_batch",
                 "domain_profile": "oxide_perovskite",
+                "ontology_path": "literature_agent/config/domain_packs/oxide_perovskite.json",
                 "search_query": "oxygen vacancy conductivity",
                 "max_papers": 25,
                 "family_gating": "strict",
@@ -151,6 +156,7 @@ def test_start_stage_non_halide_uses_general_profile_and_non_pv_gating(svc):
     assert request["domain_profile"] == "oxide_perovskite"
     assert request["extraction_profile"] == "general_literature"
     assert request["family_gating"] == "off"
+    assert request["ontology_path"] == "literature_agent/config/domain_packs/oxide_perovskite.json"
 
 
 def test_start_stage_rejects_unknown_domain_profile(svc):
