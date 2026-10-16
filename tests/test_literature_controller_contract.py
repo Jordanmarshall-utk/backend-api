@@ -38,6 +38,8 @@ except ModuleNotFoundError as exc:
 
 contract = load_structured_output_contract(sys.argv[1])
 assert "domain_measurements" in contract.fields
+assert contract.pack_id == "custom_domain"
+assert contract.pack_version == "1.0"
 print(contract.source_path)
 """
     pack = (
@@ -57,3 +59,33 @@ print(contract.source_path)
     )
 
     assert str(pack.resolve()) in result.stdout
+
+
+def test_cross_domain_controller_rejects_legacy_inline_vision():
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CONTROLLER),
+            "--base_csv",
+            str(BACKEND_ROOT / "data" / "Perovskite_database_content_all_data.csv"),
+            "--domain_profile",
+            "general_science",
+            "--inline_vision",
+            "1",
+        ],
+        cwd=CONTROLLER.parent,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 2
+    assert "Inline vision uses the legacy halide-PV prompt" in result.stderr
+
+
+def test_embedded_controller_contains_no_personal_retrieval_identity():
+    source = CONTROLLER.read_text(encoding="utf-8")
+
+    assert "Jmarsh39" + "@vols.utk.edu" not in source
+    assert "client_secret_" + "298117362376" not in source

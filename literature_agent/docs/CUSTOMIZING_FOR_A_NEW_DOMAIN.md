@@ -74,7 +74,9 @@ top-level `canonical_terms` list:
 category names by the graph normalizer.
 
 Use source control and increment the version whenever vocabulary or output
-fields change so a database or graph can record which contract produced it.
+fields change. LiteratureAgent writes `_domain_pack_id`,
+`_domain_pack_version`, and `_domain_pack_file` provenance into each domain
+record and carries the identifiers onto Paper and StudiedSystem graph nodes.
 In the application choose **General science**, open **Advanced options**, and
 select the copied file under **Ontology / domain-pack JSON**. A copied file does
 not appear as a separate profile name; adding a dedicated profile label still

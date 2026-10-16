@@ -17,6 +17,8 @@ class StructuredOutputContract:
 
     domain_instruction: str
     fields: dict[str, Any]
+    pack_id: str
+    pack_version: str
     source_path: Path
 
 
@@ -77,8 +79,22 @@ def load_structured_output_contract(path: str | Path) -> StructuredOutputContrac
             )
         validated[name] = copy.deepcopy(schema_example)
 
+    raw_pack_id = payload.get("id")
+    raw_pack_version = payload.get("version")
+    for label, value in (("id", raw_pack_id), ("version", raw_pack_version)):
+        if value is not None and not isinstance(value, (str, int, float)):
+            raise ValueError(f"Domain-pack {label} must be text or a number: {source}")
+    pack_id = str(raw_pack_id).strip() if raw_pack_id is not None else source.stem
+    pack_version = str(raw_pack_version).strip() if raw_pack_version is not None else "unversioned"
+    if not pack_id:
+        pack_id = source.stem
+    if not pack_version:
+        pack_version = "unversioned"
+
     return StructuredOutputContract(
         domain_instruction=instruction.strip(),
         fields=validated,
+        pack_id=pack_id,
+        pack_version=pack_version,
         source_path=source.resolve(),
     )

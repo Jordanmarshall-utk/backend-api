@@ -11,10 +11,26 @@ def test_generic_battery_record_builds_evidence_grounded_graph(tmp_path):
     work_dir = tmp_path / "work"
     out_dir = tmp_path / "graph"
     work_dir.mkdir()
+    summaries = work_dir / "paper_summaries_json"
+    summaries.mkdir()
+    (summaries / "battery_paper_summary.json").write_text(
+        json.dumps(
+            {
+                "paper_summary": {
+                    "primary_findings": ["The electrolyte increased ionic conductivity."],
+                    "best_reported_performance": {"pce": 99.0},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
     record = {
         "_domain_profile": "general_science",
-        "Ref_internal_sample_id": "battery_paper_001",
+        "_domain_pack_id": "battery_materials",
+        "_domain_pack_version": "v2026.1",
+        "_domain_pack_file": "battery_materials.json",
+        "Ref_internal_sample_id": "battery_paper_device_1",
         "Ref_DOI_number": "10.0000/battery-smoke",
         "Domain_system_or_subject": "lithium metal battery",
         "Domain_materials_or_entities": json.dumps(
@@ -85,3 +101,13 @@ def test_generic_battery_record_builds_evidence_grounded_graph(tmp_path):
     )
     assert any(edge[":TYPE"] == "HAS_DOMAIN_ATTRIBUTE" for edge in relationships)
     assert any(edge[":TYPE"] == "SUPPORTS_ENTITY_OR_MEASUREMENT" for edge in relationships)
+    assert not any("Device" in node[":LABEL"].split(";") for node in nodes)
+    assert not any("PerformanceMeasurement" in node[":LABEL"].split(";") for node in nodes)
+    assert not any(edge[":TYPE"] == "REPORTS_SUMMARY_PERFORMANCE" for edge in relationships)
+    paper_properties = [
+        json.loads(node["properties_json"])
+        for node in nodes
+        if "Paper" in node[":LABEL"].split(";")
+    ]
+    assert paper_properties[0]["domain_pack_id"] == "battery_materials"
+    assert paper_properties[0]["domain_pack_version"] == "v2026.1"
